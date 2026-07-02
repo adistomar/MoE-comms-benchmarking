@@ -9,8 +9,9 @@
 #SBATCH --time=1:00:00
 #SBATCH --output=moe-comms-bench-%j.out
 #
-# Full DeepEP-v2 (A2A) vs Megatron-NVLS (AGv/RSv) decode benchmark: one full
-# 88-MoE-layer decode step, swept over global batch size, then plotted.
+# Full decode benchmark of all three dispatchers (DeepEP-v2 A2A, Megatron NVLS
+# AGv/RSv multicast, Megatron NCCL AllGather): one full 88-MoE-layer decode step,
+# swept over global batch size, then plotted.
 #
 # ADJUST for your cluster: the #SBATCH --account/--partition/--qos above, the
 # CONTAINER_IMAGE and --container-mounts below, and DEEPEP_DIR (the DeepEP source
@@ -30,8 +31,9 @@ srun --container-image "$CONTAINER_IMAGE" \
         export DEEPEP_DIR='$DEEPEP_DIR'
         source ./deepep_env.sh
         cd '$BENCH_DIR'
-        torchrun --nproc_per_node=4 run.py --impl both \
-            --batch-sizes 1,2,4,8,16,32,64,128 --deepep-num-sms 16 --num-layers 88 \
+        torchrun --nproc_per_node=4 run.py --impl all \
+            --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072 \
+            --deepep-num-sms 148 --num-layers 88 \
             --reps 20 --warmup 6 --timing graph --out results.csv
         python3 -m pip install -q matplotlib 2>/dev/null || true
         python3 plot_results.py --csv results.csv --x B --out results.png

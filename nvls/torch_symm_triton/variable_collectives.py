@@ -326,7 +326,11 @@ def multimem_reduce_scatter_v(
         f"{row_bytes} bytes is not 16-byte aligned; RSV requires 128-bit alignment."
     )
 
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 128)
+    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
+    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
+    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
+    # fixes NVLS at 148 (see bench/README.md).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 
@@ -607,7 +611,11 @@ def multimem_all_gather_v(
     )
     bits = 128 if row_bytes % 16 == 0 else 64
 
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 128)
+    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
+    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
+    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
+    # fixes NVLS at 148 (see bench/README.md).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 
@@ -730,7 +738,11 @@ def multimem_all_gatherv_3tensor(
         symm_mem_hdl_0.world_size == symm_mem_hdl_1.world_size == symm_mem_hdl_2.world_size
     ), "All three symmetric memory handles must belong to the same EP group (world_size mismatch)."
 
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 128)
+    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
+    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
+    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
+    # fixes NVLS at 148 (see bench/README.md).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 

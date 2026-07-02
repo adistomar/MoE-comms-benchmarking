@@ -100,6 +100,68 @@ class DeepEPBencher:
         for _ in range(num_layers):
             self.step()
 
+    # -- correctness -----------------------------------------------------------
+    def validate(self):
+        """Round-trip correctness with RANDOM per-element tensors -> list of
+        (name, ok, detail).
+
+        With an identity expert (recv_x used verbatim as the "expert output") and
+        do_expand=False (dispatch delivers one deduped copy per destination rank),
+        rank-layout combine (allow_multiple_reduction=True) sums one copy per receiving
+        rank, so the combined result for source token t must equal
+        (#distinct destination ranks for t) * x[t], element-wise. x is random per element
+        (distinct per token AND per hidden column), so the element-wise check also catches
+        column/stride displacement and any cross-token contamination -- not just a wrong
+        reduction count. Tested with all ranks populated (B=2*ep) and 0-token ranks (B=1)."""
+        world, rank, dev = self.cfg.ep_size, self.cfg.rank, self.device
+        H, K, E = self.cfg.hidden, self.cfg.topk, self.cfg.num_experts
+        epr = E // world  # contiguous experts per rank -> dest rank = expert // epr
+        out = []
+        for B in (world * 2, 1):
+            counts = [B // world + (1 if r < B % world else 0) for r in range(world)]
+            n, off = counts[rank], sum(counts[:rank])
+            gen = torch.Generator(device=dev).manual_seed(770701 + B + rank * 131)
+            x = (torch.randn(n, H, generator=gen, device=dev).to(torch.bfloat16)
+                 if n > 0 else torch.empty(0, H, device=dev, dtype=torch.bfloat16))
+            idx = (torch.stack([torch.randperm(E, generator=gen, device=dev)[:K] for _ in range(n)])
+                   if n > 0 else torch.empty(0, K, device=dev, dtype=torch.int64))
+            self.setup_batch(x, idx, torch.ones(n, K, device=dev, dtype=torch.float32))
+            recv_x, _, _, handle, _ = self._dispatch_call()
+            rx = recv_x if isinstance(recv_x, torch.Tensor) else recv_x[0]
+            res = self.buf.combine(rx, handle=handle, topk_weights=None, bias=None,
+                                   num_sms=self.num_sms, num_qps=0,
+                                   async_with_compute_stream=False, allocate_on_comm_stream=False)
+            combined = res[0] if isinstance(res, (tuple, list)) else res
+            torch.cuda.synchronize()
+            if n > 0:
+                m = torch.tensor([torch.unique(idx[t] // epr).numel() for t in range(n)],
+                                 device=dev, dtype=torch.float32).view(n, 1)
+                got = combined[:n].to(torch.float32)
+                ref = m * x.to(torch.float32)
+                ok = bool(torch.allclose(got, ref, rtol=0.03, atol=0.05))
+                detail = (f"n={n} max|got-m*x|={float((got - ref).abs().max()):.4f} "
+                          f"m(#dest_ranks)={m.view(-1)[:min(n, 4)].to(torch.int64).tolist()}")
+            else:
+                ok, detail = True, "n=0 (idle rank still participates in the A2A)"
+            out.append((f"DeepEP dispatch->combine B={B:<4d}", ok, detail))
+        return out
+
+    def functional_roundtrip(self, hidden, topk_idx):
+        """Full functional dispatch -> (identity expert) -> UNWEIGHTED combine, returning
+        the combined output [n,H] for this rank's owned tokens == (#distinct dest ranks
+        for t) * x[t] -- the same quantity NVLS's masked-identity round-trip yields, for a
+        cross-impl equality check in run.py."""
+        n = hidden.shape[0]
+        self.setup_batch(hidden, topk_idx,
+                         torch.ones(n, self.cfg.topk, device=self.device, dtype=torch.float32))
+        recv_x, _, _, handle, _ = self._dispatch_call()
+        rx = recv_x if isinstance(recv_x, torch.Tensor) else recv_x[0]
+        res = self.buf.combine(rx, handle=handle, topk_weights=None, bias=None,
+                               num_sms=self.num_sms, num_qps=0,
+                               async_with_compute_stream=False, allocate_on_comm_stream=False)
+        combined = res[0] if isinstance(res, (tuple, list)) else res
+        return combined[:n]
+
     def destroy(self):
         if getattr(self, "buf", None) is not None:
             self.buf.destroy()
