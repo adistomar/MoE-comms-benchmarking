@@ -13,7 +13,8 @@ schemes used for **inference decode** within a single NVLink domain:
   algorithm** as NVLS (AllGather → local experts → ReduceScatter) but over **plain NCCL
   collectives** instead of NVLink multicast. The graphable path requires equal per-rank
   token counts, so ranks are **padded** to the per-step max. NVLS-vs-NCCL therefore
-  isolates the *transport* (NVLink multicast vs NCCL ring/tree) at equal precision (fp32).
+  contrasts the *transport* (NVLink multicast vs NCCL ring/tree) on the same dense
+  algorithm — though they now differ in combine precision (NVLS bf16, NCCL fp32; see Caveats).
 
 Both Megatron dispatchers are simulated standalone: the NVLS collectives are **vendored**
 (`nvls/`, an isolated copy of Megatron's `torch_symm_triton` + `symmetric_memory.py` +
@@ -33,7 +34,8 @@ step / num_layers.
   notify/count-exchange) then `combine_impl` + reduce epilogue.
 - **NVLS** per step: `fused_metadata_update` **once** (token-count sum/prefix/max,
   routing-independent — Megatron runs it only at the first MoE layer) then, per layer,
-  `multimem_all_gatherv_3tensor` (AGV-V) → `multimem_reduce_scatter_v` (RSV-V).
+  `multimem_all_gatherv_3tensor` (AGV-V) → `multimem_reduce_scatter_v` (RSV-V; **bf16**
+  buffer, fp32-accumulated).
 - **NCCL** per layer: 3× `all_gather_into_tensor` (hidden bf16, routing int64, probs fp32)
   → `reduce_scatter_tensor` (fp32). No once-per-step metadata collective (equal per-rank
   counts are guaranteed by padding, discovered with one `all_reduce(MAX)` in setup,
@@ -45,7 +47,7 @@ step / num_layers.
 |---|---|
 | experts / top-k / hidden | 512 / 22 / 1024 |
 | parallelism | EP=4 (1 rank/GPU), TP=1, single NVLink domain |
-| dtype | dispatch **bf16** (all three); combine **fp32** for NVLS & NCCL, **bf16** for DeepEP |
+| dtype | dispatch **bf16** (all three); combine **bf16** for NVLS & DeepEP (NVLS accumulates the reduction in fp32 via `acc::f32`), **fp32** for NCCL |
 | batch axis | **GLOBAL** B ∈ {1,…,8192} tokens across all 4 ranks (balanced; B<4 leaves some ranks with 0 tokens; NCCL pads to the per-step max) |
 | layers | 88 MoE layers per decode step (`--num-layers`) |
 | routing | uniform: 22 distinct experts/token; identical tensors fed to all impls |
@@ -71,8 +73,8 @@ AGV-V gathers each rank's tokens to the right global offset, NVLS RSV-V sums acr
 and scatters to the right owner, NCCL's padded AllGather→ReduceScatter round-trips
 correctly, and DeepEP's dispatch→combine round-trips to `m·x` (`m` = #destination ranks).
 With ≥2 impls built it also **cross-checks** that all of them produce the same combine
-output on identical inputs (all compute `m·x`; NVLS & NCCL match exactly in fp32, DeepEP
-differs only by bf16 rounding). Prints `[PASS]/[FAIL]` per check and a verdict reduced
+output on identical inputs (all compute `m·x`; NCCL is exact in fp32, NVLS & DeepEP combine
+in bf16 and agree within bf16 rounding). Prints `[PASS]/[FAIL]` per check and a verdict reduced
 across ranks (exit 0/1); tested at a full batch (`B=2·ep`) and the 0-token-rank case (`B=1`).
 
 ## Setup
@@ -160,10 +162,13 @@ on Triton versions that already type it i64. Without it the NVLS path will not c
 - `run.sbatch` — SLURM batch template.
 
 ## Caveats
-- **Combine precision.** NVLS and NCCL reduce in **fp32** (high-precision, 2× combine
-  bytes); DeepEP keeps activations in **bf16**. NVLS-vs-NCCL is thus a clean transport
-  comparison (same dense algorithm, same precision); the fp32-vs-bf16 gap to DeepEP is
-  left as-is since it favors DeepEP.
+- **Combine precision.** NVLS and DeepEP combine in **bf16**; NCCL combines in **fp32**.
+  NVLS's ReduceScatter-V moves bf16 operands but **accumulates the cross-rank sum in fp32**
+  (`multimem.ld_reduce.add.acc::f32.v4.bf16x2`) — high precision at half the fp32 combine
+  bytes. So NVLS↔DeepEP now match on combine precision (bf16), while NVLS-vs-NCCL differs in
+  **both** transport and combine dtype; read that pair as a transport+precision contrast,
+  not pure transport. (To restore a pure-transport NVLS-vs-NCCL comparison, switch NCCL's
+  `reduce_scatter_tensor` to bf16 in `bench_nccl.py`.)
 - **NCCL padding.** The graphable NCCL path requires equal per-rank token counts, so ranks
   are padded to the per-step max (`ceil(B/ep)`). Under the balanced global-B split counts
   differ by ≤1, so padding is negligible; the padded rows are gathered/reduced then

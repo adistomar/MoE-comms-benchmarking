@@ -146,9 +146,9 @@ def main():
         # Cross-implementation equivalence (>=2 impls built): feed the SAME random
         # tokens + routing to every impl, run a full functional dispatch -> identity
         # expert -> combine, and require all outputs to match the analytic m*x (m =
-        # #distinct dest ranks) AND each other. NVLS and NCCL reduce in fp32 (exact m*x);
-        # DeepEP is bf16 (rounds). This shows (a) the impls are mutually equivalent and
-        # (b) dividing by m recovers the dispatch input x.
+        # #distinct dest ranks) AND each other. NCCL reduces in fp32 (exact m*x); NVLS and
+        # DeepEP combine in bf16 (round). The 2%/5% tolerances below absorb bf16 rounding.
+        # This shows the impls are mutually equivalent and that dividing by m recovers x.
         rt = [b for b in benchers if hasattr(b, "functional_roundtrip")]
         if len(rt) >= 2:
             E, K, H, epr = cfg.num_experts, cfg.topk, cfg.hidden, cfg.num_experts // world
