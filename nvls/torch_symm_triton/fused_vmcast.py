@@ -1,28 +1,26 @@
-# Copyright (c) 2026. Fused per-token variable-multicast dispatch/combine for vmcast.
+# Copyright (c) 2026. Fused per-token variable-multicast dispatch/combine for the one-buffer vmcast.
 """
-Fused kernels for the variable-size multicast MoE dispatcher (bench_vmcast.py).
+Fused kernels for the one-buffer variable-size multicast MoE dispatcher (bench_vmcast_onebuf.py).
 
-The un-fused vmcast prototype issues ONE multimem AllGather-V / ReduceScatter-V collective
-PER distinct active group size, run sequentially -> N group barriers per layer. Under a mixed
-routing distribution every nested size is populated, so the cost is dominated by
-(#active sizes) x (one cross-node barrier each). See the mixed-routing measurement.
-
-These kernels collapse that to ONE launch + ONE global barrier:
+Dispatch and combine are each ONE launch + ONE global barrier:
 
   - one CTA per token (persistent grid-stride loop over this rank's local tokens);
   - each token multicast-stores (dispatch) / multimem.ld_reduce-loads (combine) to/from ITS OWN
-    group's multicast VA, looked up from a per-token pointer array (tok_mc_*), at its slot in
-    that group's buffer (tok_slot). Tokens on the same rank targeting different-size groups are
-    handled by the same kernel -- no per-size passes.
-  - a SINGLE global (size-P) symm_mem_sync barrier. A size-P barrier is a correct superset of
-    every nested subgroup's barrier (each subgroup is a subset of all P ranks), so one global
-    sync safely orders all the per-token multicasts. The grid is min(per_rank_cap, MAX_BLOCKS),
-    identical on every rank, so all CTAs pair up by block_id (no ep_max early-exit needed).
+    group's multicast VA. The ONLY routing-dependent per-token value is tok_size_idx (which of the
+    NSZ nested groups it picked); the kernel gathers the actual VA from the per-size menus mc_ptrs_*
+    by that index. Tokens on one rank targeting different-size groups run in the same kernel -- no
+    per-size passes.
+  - the buffer row is the COMPACTED global row = rank_token_offset + t (t = the token loop index),
+    computed IN-KERNEL from the once-per-step scalar rank_token_offset -- exactly like NVLS's
+    AllGather-V (global_offsets = rank_token_offset + token_offset). No per-token row array.
+  - a SINGLE global (size-P) symm_mem_sync barrier. A size-P barrier is a correct superset of every
+    nested subgroup's barrier (each subgroup is a subset of all P ranks), so one global sync safely
+    orders all the per-token multicasts. The grid is min(per_rank_cap, MAX_BLOCKS), identical on
+    every rank, so all CTAs pair up by block_id.
 
-Layout matches the per-group AGv/RSv exactly: token t (source rank r, group g) lives at row
-tok_slot[t] = rank_token_offset_g(r) + j of group g's [gcap, H] buffer, so the vendored mask
-(_mask_into_rsv) and this combine read the same slots. Byte movement matches flat NVLS (all
-three tensors: hidden bf16, routing int64, probs fp32).
+The four transport buffers (hidden bf16, routing int64, probs fp32, rsv bf16) are the SAME allocations
+NVLS uses; vmcast just rendezvouses each over every nested group to get one aliased multicast VA per
+group (the mc_ptrs_* menus). Byte movement matches flat NVLS.
 """
 from unittest.mock import MagicMock
 
@@ -49,112 +47,21 @@ MAX_NUM_BLOCKS = 148
 
 
 @triton.jit
-def _vmcast_layout_kernel(
-    in_routing_ptr,                                   # [n, K] int64 topk expert ids
-    mc_h_arr, mc_r_arr, mc_p_arr, mc_v_arr,           # [NSZ] int64 per-size group multicast VAs
-    counts_ptr,                                       # [NSZ] int32 atomic accumulator (pre-zeroed)
-    size_idx_ptr, intra_ptr,                          # [n] int32 out
-    tok_mc_h_ptr, tok_mc_r_ptr, tok_mc_p_ptr, tok_mc_v_ptr,   # [n] int64 out
-    n_tokens,
+def _vmcast_size_kernel(
+    in_routing_ptr, size_idx_ptr, n_tokens,
     K: tl.constexpr, EPR: tl.constexpr, RANK: tl.constexpr,
     MIN_GROUP: tl.constexpr, NSZ: tl.constexpr, BLOCK: tl.constexpr,
 ):
-    """Per-token group layout in ONE launch (one lane per token, grid-stride). Replaces ~15 tiny torch
-    ops. For each token: reduce its K experts to the dest-rank span [lo,hi] (source RANK forced in),
-    tok_size = smallest aligned pow2 block spanning it (via diff=lo^hi: smallest MIN_GROUP<<i > diff),
-    take an atomic intra-rank position within that size's bucket (also fills the per-size count), and
-    gather the size's four multicast VAs. Slot = rank_token_offset (metadata) + intra is added later."""
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_tokens
-
-    # Widen raw int pointer args to i64 then type them (Triton-3.6: tt.int_to_ptr needs i64).
-    rp = in_routing_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mch = mc_h_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcr = mc_r_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcp = mc_p_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcv = mc_v_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    cnt = counts_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    si_out = size_idx_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    in_out = intra_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    th = tok_mc_h_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tr = tok_mc_r_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tp = tok_mc_p_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tv = tok_mc_v_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-
-    lo = tl.full((BLOCK,), RANK, tl.int64)
-    hi = tl.full((BLOCK,), RANK, tl.int64)
-    for k in range(K):
-        e = tl.load(rp + offs * K + k, mask=mask, other=RANK * EPR)
-        d = e // EPR
-        lo = tl.minimum(lo, d)
-        hi = tl.maximum(hi, d)
-    diff = lo ^ hi                                     # 0 iff single dest rank == source
-    size_idx = tl.full((BLOCK,), NSZ - 1, tl.int32)    # size-P always fits
-    for i in range(NSZ - 1, -1, -1):                   # keep the SMALLEST fitting size
-        size_idx = tl.where(diff < (MIN_GROUP << i), i, size_idx)
-
-    # atomic per-size counter: returns this token's 0-based position in its bucket AND accumulates count.
-    intra = tl.atomic_add(cnt + size_idx, 1, mask=mask)
-
-    mh = tl.load(mch + size_idx)
-    mr = tl.load(mcr + size_idx)
-    mp = tl.load(mcp + size_idx)
-    mv = tl.load(mcv + size_idx)
-    tl.store(si_out + offs, size_idx, mask=mask)
-    tl.store(in_out + offs, intra, mask=mask)
-    tl.store(th + offs, mh, mask=mask)
-    tl.store(tr + offs, mr, mask=mask)
-    tl.store(tp + offs, mp, mask=mask)
-    tl.store(tv + offs, mv, mask=mask)
-
-
-def vmcast_compute_group(in_routing, mc_by_size, counts, size_idx, intra,
-                         tok_mc_h, tok_mc_r, tok_mc_p, tok_mc_v,
-                         epr, rank, min_group, nsz):
-    """Launch the layout kernel. in_routing [n,K] int64; mc_by_size = (h,r,p,v) [NSZ] int64 tensors;
-    counts [NSZ] int32 must be pre-zeroed. Fills size_idx/intra [n] int32 and tok_mc_* [n] int64."""
-    assert HAVE_TRITON
-    n, K = in_routing.shape
-    BLOCK = 256
-    grid = ((n + BLOCK - 1) // BLOCK, 1, 1)
-    _vmcast_layout_kernel[grid](
-        in_routing.data_ptr(),
-        mc_by_size[0].data_ptr(), mc_by_size[1].data_ptr(),
-        mc_by_size[2].data_ptr(), mc_by_size[3].data_ptr(),
-        counts.data_ptr(), size_idx.data_ptr(), intra.data_ptr(),
-        tok_mc_h.data_ptr(), tok_mc_r.data_ptr(), tok_mc_p.data_ptr(), tok_mc_v.data_ptr(),
-        n, K=K, EPR=epr, RANK=rank, MIN_GROUP=min_group, NSZ=nsz, BLOCK=BLOCK,
-    )
-
-
-@triton.jit
-def _vmcast_layout_slotless_kernel(
-    in_routing_ptr,
-    mc_h_arr, mc_r_arr, mc_p_arr, mc_v_arr,           # [NSZ] int64 per-size group multicast VAs
-    size_idx_ptr,                                     # [n] int32 out (debug/hist only)
-    tok_mc_h_ptr, tok_mc_r_ptr, tok_mc_p_ptr, tok_mc_v_ptr,   # [n] int64 out
-    n_tokens,
-    K: tl.constexpr, EPR: tl.constexpr, RANK: tl.constexpr,
-    MIN_GROUP: tl.constexpr, NSZ: tl.constexpr, BLOCK: tl.constexpr,
-):
-    """Slotless per-token layout for the ONE-BUFFER design: tok_size (bit trick on the dest-rank span)
-    -> gather the size's four multicast VAs. NO atomic / counts / intra -- the global row is static
-    (rank*cap + i), so there's no compaction to scan. Removes the cross-token atomic serialization."""
+    """Per-token group-size selection for the ONE-BUFFER design. Reduce the token's K experts to the
+    dest-rank span [lo,hi] (source RANK forced in), then emit its group-size index size_idx = smallest
+    aligned pow2 block spanning it (bit trick: diff=lo^hi -> smallest i with MIN_GROUP<<i > diff).
+    That single index is the only routing-dependent per-token value; dispatch/combine gather the actual
+    VAs from the per-size menus (mc_ptrs_*) by it. No VA gather / atomic / counts here."""
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_tokens
     rp = in_routing_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mch = mc_h_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcr = mc_r_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcp = mc_p_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    mcv = mc_v_arr.to(tl.int64).to(tl.pointer_type(tl.int64))
     si_out = size_idx_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    th = tok_mc_h_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tr = tok_mc_r_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tp = tok_mc_p_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-    tv = tok_mc_v_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
-
     lo = tl.full((BLOCK,), RANK, tl.int64)
     hi = tl.full((BLOCK,), RANK, tl.int64)
     for k in range(K):
@@ -166,29 +73,18 @@ def _vmcast_layout_slotless_kernel(
     size_idx = tl.full((BLOCK,), NSZ - 1, tl.int32)
     for i in range(NSZ - 1, -1, -1):
         size_idx = tl.where(diff < (MIN_GROUP << i), i, size_idx)
-
     tl.store(si_out + offs, size_idx, mask=mask)
-    tl.store(th + offs, tl.load(mch + size_idx), mask=mask)
-    tl.store(tr + offs, tl.load(mcr + size_idx), mask=mask)
-    tl.store(tp + offs, tl.load(mcp + size_idx), mask=mask)
-    tl.store(tv + offs, tl.load(mcv + size_idx), mask=mask)
 
 
-def vmcast_compute_group_slotless(in_routing, mc_by_size, size_idx,
-                                  tok_mc_h, tok_mc_r, tok_mc_p, tok_mc_v,
-                                  epr, rank, min_group, nsz):
-    """Lean layout for the one-buffer bencher: fills size_idx [n] int32 and tok_mc_* [n] int64.
-    No counts/intra/atomic (static slots). in_routing [n,K] int64; mc_by_size = (h,r,p,v) [NSZ] int64."""
+def vmcast_compute_size(in_routing, size_idx, epr, rank, min_group, nsz):
+    """Fill size_idx [n] int32 = each token's group-size index (its choice among the NSZ nested groups).
+    in_routing [n,K] int64. Dispatch/combine gather the VAs from the menus by this index."""
     assert HAVE_TRITON
     n, K = in_routing.shape
     BLOCK = 256
     grid = ((n + BLOCK - 1) // BLOCK, 1, 1)
-    _vmcast_layout_slotless_kernel[grid](
-        in_routing.data_ptr(),
-        mc_by_size[0].data_ptr(), mc_by_size[1].data_ptr(),
-        mc_by_size[2].data_ptr(), mc_by_size[3].data_ptr(),
-        size_idx.data_ptr(),
-        tok_mc_h.data_ptr(), tok_mc_r.data_ptr(), tok_mc_p.data_ptr(), tok_mc_v.data_ptr(),
+    _vmcast_size_kernel[grid](
+        in_routing.data_ptr(), size_idx.data_ptr(),
         n, K=K, EPR=epr, RANK=rank, MIN_GROUP=min_group, NSZ=nsz, BLOCK=BLOCK,
     )
 
@@ -196,7 +92,9 @@ def vmcast_compute_group_slotless(in_routing, mc_by_size, size_idx,
 @triton.jit
 def _fused_dispatch_kernel(
     in_h_ptr, in_r_ptr, in_p_ptr,
-    tok_mc_h_ptr, tok_mc_r_ptr, tok_mc_p_ptr, tok_slot_ptr,
+    mc_ptrs_h_ptr, mc_ptrs_r_ptr, mc_ptrs_p_ptr,      # [NSZ] int64 per-size VA menus
+    tok_size_idx_ptr,                                 # [n] int32 per-token group index
+    rank_token_offset_ptr,                            # scalar int32: this rank's compacted-row base (NVLS)
     signal_pad_ptrs,
     n_tokens,
     NPT_H: tl.constexpr,
@@ -211,7 +109,7 @@ def _fused_dispatch_kernel(
     """Per-token variable-multicast all-gather (dispatch). One CTA per token, then a global barrier.
 
     Each token multicast-stores hidden(128b)/routing(BITS_R)/probs(BITS_P) into its own group's
-    buffer at row tok_slot[t], reading this rank's local input row t directly (no compaction).
+    buffer at row (rank_token_offset + t), reading this rank's local input row t directly (no compaction).
     """
     pid = tl.program_id(axis=0)
 
@@ -219,19 +117,22 @@ def _fused_dispatch_kernel(
     in_h_ptr = in_h_ptr.to(tl.int64)
     in_r_ptr = in_r_ptr.to(tl.int64)
     in_p_ptr = in_p_ptr.to(tl.int64)
-    tok_mc_h_ptr = tok_mc_h_ptr.to(tl.int64)
-    tok_mc_r_ptr = tok_mc_r_ptr.to(tl.int64)
-    tok_mc_p_ptr = tok_mc_p_ptr.to(tl.int64)
-    tok_slot_ptr = tok_slot_ptr.to(tl.int64)
+    mc_ptrs_h_ptr = mc_ptrs_h_ptr.to(tl.int64)
+    mc_ptrs_r_ptr = mc_ptrs_r_ptr.to(tl.int64)
+    mc_ptrs_p_ptr = mc_ptrs_p_ptr.to(tl.int64)
+    tok_size_idx_ptr = tok_size_idx_ptr.to(tl.int64)
+    rank_token_offset_ptr = rank_token_offset_ptr.to(tl.int64)
 
     tid = tl.arange(0, BLOCK_SIZE)
     num_prog = tl.num_programs(axis=0)
+    offset = tl.load(rank_token_offset_ptr.to(tl.pointer_type(tl.int32))).to(tl.int64)  # NVLS: scalar, once
 
     for t in range(pid, n_tokens, num_prog):
-        slot = tl.load(tok_slot_ptr.to(tl.pointer_type(tl.int32)) + t).to(tl.int64)
+        slot = offset + t                                                   # compacted row = offset + t
+        sidx = tl.load(tok_size_idx_ptr.to(tl.pointer_type(tl.int32)) + t)   # token's group index (menu idx)
 
-        # --- hidden (128-bit) ---
-        mc_h = tl.load(tok_mc_h_ptr.to(tl.pointer_type(tl.int64)) + t).to(tl.pointer_type(tl.uint64))
+        # --- hidden (128-bit) ---  gather this size's hidden-buffer VA from the menu
+        mc_h = tl.load(mc_ptrs_h_ptr.to(tl.pointer_type(tl.int64)) + sidx).to(tl.pointer_type(tl.uint64))
         src_h = in_h_ptr.to(tl.pointer_type(tl.uint64))
         for co in range(0, NPT_H, BLOCK_SIZE):
             ch = co + tid
@@ -240,7 +141,7 @@ def _fused_dispatch_kernel(
             st_128(mc_h + (slot * NPT_H + ch) * 2, x, y, z, w, mask=m, multicast_op=True)
 
         # --- routing (BITS_R) ---
-        mc_r = tl.load(tok_mc_r_ptr.to(tl.pointer_type(tl.int64)) + t).to(tl.pointer_type(tl.uint64))
+        mc_r = tl.load(mc_ptrs_r_ptr.to(tl.pointer_type(tl.int64)) + sidx).to(tl.pointer_type(tl.uint64))
         src_r = in_r_ptr.to(tl.pointer_type(tl.uint64))
         for co in range(0, NPT_R, BLOCK_SIZE):
             ch = co + tid
@@ -253,7 +154,7 @@ def _fused_dispatch_kernel(
                 st_64(mc_r + (slot * NPT_R + ch), x, y, mask=m, multicast_op=True)
 
         # --- probs (BITS_P) ---
-        mc_p = tl.load(tok_mc_p_ptr.to(tl.pointer_type(tl.int64)) + t).to(tl.pointer_type(tl.uint64))
+        mc_p = tl.load(mc_ptrs_p_ptr.to(tl.pointer_type(tl.int64)) + sidx).to(tl.pointer_type(tl.uint64))
         src_p = in_p_ptr.to(tl.pointer_type(tl.uint64))
         for co in range(0, NPT_P, BLOCK_SIZE):
             ch = co + tid
@@ -275,7 +176,8 @@ def _fused_dispatch_kernel(
 @triton.jit
 def _fused_combine_kernel(
     out_ptr,
-    tok_mc_v_ptr, tok_slot_ptr,
+    mc_ptrs_v_ptr, tok_size_idx_ptr,                 # [NSZ] rsv-VA menu + [n] per-token group index
+    rank_token_offset_ptr,                           # scalar int32: compacted-row base (NVLS)
     signal_pad_ptrs,
     n_tokens,
     NPT_H: tl.constexpr,
@@ -286,12 +188,13 @@ def _fused_combine_kernel(
 ):
     """Per-token variable-multicast reduce-scatter (combine). Global barrier, then one CTA per token.
 
-    Each token multimem.ld_reduce-loads its row (tok_slot[t]) from its own group's RSv buffer --
+    Each token multimem.ld_reduce-loads its row ((rank_token_offset + t)) from its own group's RSv buffer --
     summing over that group's members -- and writes the result to local out[t]."""
     pid = tl.program_id(axis=0)
     out_ptr = out_ptr.to(tl.int64)
-    tok_mc_v_ptr = tok_mc_v_ptr.to(tl.int64)
-    tok_slot_ptr = tok_slot_ptr.to(tl.int64)
+    mc_ptrs_v_ptr = mc_ptrs_v_ptr.to(tl.int64)
+    tok_size_idx_ptr = tok_size_idx_ptr.to(tl.int64)
+    rank_token_offset_ptr = rank_token_offset_ptr.to(tl.int64)
 
     # Wait for all ranks to have written their expert outputs before any read.
     symm_mem_sync(
@@ -303,10 +206,12 @@ def _fused_combine_kernel(
     tid = tl.arange(0, BLOCK_SIZE)
     num_prog = tl.num_programs(axis=0)
     dst = out_ptr.to(tl.pointer_type(tl.uint64))
+    offset = tl.load(rank_token_offset_ptr.to(tl.pointer_type(tl.int32))).to(tl.int64)  # NVLS: scalar, once
 
     for t in range(pid, n_tokens, num_prog):
-        slot = tl.load(tok_slot_ptr.to(tl.pointer_type(tl.int32)) + t).to(tl.int64)
-        mc_v = tl.load(tok_mc_v_ptr.to(tl.pointer_type(tl.int64)) + t).to(tl.pointer_type(tl.uint64))
+        slot = offset + t
+        sidx = tl.load(tok_size_idx_ptr.to(tl.pointer_type(tl.int32)) + t)
+        mc_v = tl.load(mc_ptrs_v_ptr.to(tl.pointer_type(tl.int64)) + sidx).to(tl.pointer_type(tl.uint64))
         for co in range(0, NPT_H, BLOCK_SIZE):
             ch = co + tid
             m = ch < NPT_H
@@ -326,12 +231,14 @@ def _bits_npt(row_elems, elem_bytes):
 
 
 def fused_vmcast_dispatch(
-    in_h, in_r, in_p, tok_mc_h, tok_mc_r, tok_mc_p, tok_slot,
+    in_h, in_r, in_p, mc_ptrs_h, mc_ptrs_r, mc_ptrs_p, tok_size_idx, rank_token_offset,
     n_tokens, signal_pad_ptrs, rank, world_size, per_rank_cap,
     max_num_blocks=MAX_NUM_BLOCKS,
 ):
-    """Fused variable-multicast dispatch. in_* are this rank's local [n, *] inputs; tok_mc_*/tok_slot
-    are per-token int64 group multicast VAs / int32 dest rows. One launch, one global barrier."""
+    """Fused variable-multicast dispatch. in_* are this rank's local [n, *] inputs; mc_ptrs_* are the
+    [NSZ] per-size VA menus (one per buffer); tok_size_idx [n] picks each token's group; rank_token_offset
+    (scalar) sets the compacted row = offset + t. Each CTA gathers its VA = mc_ptrs[tok_size_idx[t]].
+    One launch, one global barrier."""
     assert HAVE_TRITON, "Triton required for fused vmcast dispatch."
     assert is_device_nvls_capable(in_h.device), "fused vmcast needs SM>=9 NVLink."
     H, K = in_h.shape[1], in_r.shape[1]
@@ -343,7 +250,8 @@ def fused_vmcast_dispatch(
     num_blocks = min(per_rank_cap, max_num_blocks)
     _fused_dispatch_kernel[(num_blocks, 1, 1)](
         in_h.data_ptr(), in_r.data_ptr(), in_p.data_ptr(),
-        tok_mc_h.data_ptr(), tok_mc_r.data_ptr(), tok_mc_p.data_ptr(), tok_slot.data_ptr(),
+        mc_ptrs_h.data_ptr(), mc_ptrs_r.data_ptr(), mc_ptrs_p.data_ptr(),
+        tok_size_idx.data_ptr(), rank_token_offset.data_ptr(),
         signal_pad_ptrs,
         n_tokens,
         NPT_H=npt_h, NPT_R=npt_r, NPT_P=npt_p,
@@ -355,11 +263,12 @@ def fused_vmcast_dispatch(
 
 
 def fused_vmcast_combine(
-    out, tok_mc_v, tok_slot, n_tokens, signal_pad_ptrs, rank, world_size, per_rank_cap,
+    out, mc_ptrs_v, tok_size_idx, rank_token_offset, n_tokens, signal_pad_ptrs, rank, world_size, per_rank_cap,
     max_num_blocks=MAX_NUM_BLOCKS,
 ):
-    """Fused variable-multicast combine. Reads each token's row from its group's RSv buffer via
-    multimem.ld_reduce (bf16 with f32 accumulation) into local out[t]. Global barrier first."""
+    """Fused variable-multicast combine. mc_ptrs_v [NSZ] = the rsv-VA menu; each CTA gathers its VA =
+    mc_ptrs_v[tok_size_idx[t]], ld_reduces row (rank_token_offset + t) over that group (bf16, f32 accum) into
+    out[t]. Global barrier first."""
     assert HAVE_TRITON, "Triton required for fused vmcast combine."
     H = out.shape[1]
     _, npt_h = _bits_npt(H, out.element_size())
@@ -369,7 +278,7 @@ def fused_vmcast_combine(
     reduce_f32 = out.dtype == torch.float32
     _fused_combine_kernel[(num_blocks, 1, 1)](
         out.data_ptr(),
-        tok_mc_v.data_ptr(), tok_slot.data_ptr(),
+        mc_ptrs_v.data_ptr(), tok_size_idx.data_ptr(), rank_token_offset.data_ptr(),
         signal_pad_ptrs,
         n_tokens,
         NPT_H=npt_h,

@@ -63,13 +63,6 @@ def parse_args():
                         "source rank's aligned L-rank block (exercises vmcast's smaller multicasts)")
     p.add_argument("--vmcast-debug", action="store_true",
                    help="vmcast: print per-batch tok_size histogram (verify routing->group bucketing)")
-    p.add_argument("--vmcast-fused", action="store_true",
-                   help="vmcast: use the fused per-token multicast kernel (1 launch + 1 global barrier "
-                        "instead of one collective per active group size)")
-    p.add_argument("--vmcast-inline-layout", action="store_true",
-                   help="vmcast (fused): compute the per-token group+slot layout ON DEVICE per layer "
-                        "INSIDE the timed decode_step -- the production-honest cost (routing is produced "
-                        "per-layer by the router in the model graph, so it can't be hoisted to setup)")
     p.add_argument("--routing-unaligned", action="store_true",
                    help="place the locality window UNALIGNED (source-anchored, random offset) instead of "
                         "an aligned power-of-2 block -> realistic: vmcast's aligned multicast group can be "
@@ -188,11 +181,6 @@ def main():
         if args.hier_fused:
             hb.name = "hier_fused"
         benchers.append(hb)
-    if "vmcast" in impls:
-        from bench_vmcast import VMCastBencher
-        benchers.append(VMCastBencher(cfg, group, min_group=args.vmcast_min_group,
-                                      debug=args.vmcast_debug, fused=args.vmcast_fused,
-                                      inline_layout=args.vmcast_inline_layout))
     if "vmcast1buf" in impls:
         from bench_vmcast_onebuf import VMCastOneBufBencher
         benchers.append(VMCastOneBufBencher(cfg, group, min_group=args.vmcast_min_group,

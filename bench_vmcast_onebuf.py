@@ -7,19 +7,22 @@ of shape [P*cap, *] and rendezvous it over EVERY nested aligned group (size-2 {0
 ... size-P {0..P-1}) -- torch symm-mem gives a DISTINCT multicast VA per group that ALIASES the one
 allocation (confirmed by probe_aliased_mcast.py). Then:
 
-  * Token (source rank r, local index i) always lives at its FIXED GLOBAL row  r*cap + i  -- exactly
-    where NVLS's dense AllGather would put it. This is routing-INDEPENDENT: no offset prefix, no scan,
-    no per-layer metadata collective. tok_slot is a static array computed once.
+  * Token (source rank r, local index i) lives at the COMPACTED global row  offset[r] + i  -- exactly
+    where NVLS's dense AllGather puts it. offset[r] = rank_token_offset is the prefix sum of the
+    routing-INDEPENDENT source counts, from the SAME once-per-step fused_metadata_update collective NVLS
+    runs (NVLS parity; timed inside decode_step). The row is thus routing-independent -- no per-LAYER
+    collective -- but does cost one count all-gather per step, like NVLS.
   * Per token we pick the smallest aligned group spanning {r} U dest_ranks(token) (tok_size) and multicast
     through THAT group's aliased VA: the store reaches only that group's ranks, but lands at the global
     row in the one shared buffer. Ranks outside the group keep a stale row there -- harmless, because
     they don't host the token's experts AND the combine reduces only over the token's group VA, so a
     stale out-of-group slot is never in the sum.
 
-Honest per-layer layout = ONE elementwise pass computing tok_size -> gather tok_mc_* (device-only,
-graph-capturable, NO collective). This runs INSIDE the timed decode_step, per layer -- structurally the
-same shape as NVLS (which pays a routing-independent metadata exchange once per step). Reuses the fused
-per-token multicast kernels (nvls/torch_symm_triton/fused_vmcast.py) unchanged.
+Honest per-layer layout = ONE elementwise pass computing tok_size_idx (each token's group index; the
+dispatch/combine kernels gather the actual VAs from the per-size menus by it) -- device-only,
+graph-capturable, NO per-layer collective. Plus a once-per-step count exchange for the compacted offset.
+Both run INSIDE the timed decode_step -- structurally the same shape as NVLS. Reuses the fused per-token
+multicast kernels (nvls/torch_symm_triton/fused_vmcast.py) unchanged.
 """
 import torch
 import torch.distributed as dist
@@ -27,8 +30,10 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from nvls.torch_symm_triton.fused_vmcast import (
-    fused_vmcast_dispatch, fused_vmcast_combine, vmcast_compute_group_slotless,
+    fused_vmcast_dispatch, fused_vmcast_combine, vmcast_compute_size,
 )
+from nvls.symmetric_memory import SymmetricMemoryManager
+from nvls.metadata import fused_metadata_update
 from common import Config
 
 NVLS_MAX_BLOCKS = 148
@@ -55,91 +60,91 @@ class VMCastOneBufBencher:
         self._dbg_seen = set()
         self._built = False
 
-    # -- one-time (collective) allocation --------------------------------------
+    # -- one-time (collective) allocation.  This is the NVLS build() plus ONLY the pieces the multiple-VA
+    #    per-token-selection approach needs; every addition is labelled [vmcast].
     def build(self):
         cfg = self.cfg
-        P, rank, cap = cfg.ep_size, cfg.rank, cfg.per_rank_cap
-        H, K = cfg.hidden, cfg.topk
-        self.epr = cfg.num_experts // P
-        self.sizes = nested_sizes(P, self.min_group)
-        gcap = P * cap                      # shared buffer rows = full global capacity
-        self.gcap = gcap
+        gmax = cfg.global_cap                 # NVLS: buffer rows = per_rank_cap * ep_size
+        K, H = cfg.topk, cfg.hidden           # NVLS
+        dev = self.device
 
-        # Create every nested aligned group (all ranks, same order); keep this rank's group per size.
-        self.pgs = {}
+        # [vmcast] size ladder + dest-rank divisor -- needed to pick a token's sub-group (tok_size).
+        P, rank = cfg.ep_size, cfg.rank
+        self.epr = cfg.num_experts // P                    # dest rank of an expert = expert // epr
+        self.sizes = nested_sizes(P, self.min_group)       # multicast-group sizes [2,4,..,P]
+        self.gcap = gmax
+
+        # [vmcast] nested aligned sub-groups, so a token can multicast to a SUBSET of ranks (not all P).
+        #          Enable ALL before allocating, so ONE buffer can be rendezvoused (aliased) over each.
+        #          size-P reuses NVLS's WORLD group; new_group is collective (every rank makes every one).
+        self.pgs = {P: self.group}
         for s in self.sizes:
             for start in range(0, P, s):
-                members = list(range(start, start + s))
-                pg = dist.new_group(members)
-                if rank in members:
+                pg = dist.new_group(list(range(start, start + s)))
+                if s != P and start <= rank < start + s:
                     self.pgs[s] = pg
-        for s in self.sizes:
-            symm_mem.enable_symm_mem_for_group(self.pgs[s].group_name)
+        for pg in self.pgs.values():        # enable ALL (incl WORLD) BEFORE allocating -> aliasing works
+            symm_mem.enable_symm_mem_for_group(pg.group_name)
 
-        # ONE shared buffer per tensor; rendezvous each over every nested group -> aliased VA per size.
-        def alloc(numel, dtype):
-            return symm_mem.empty(numel, dtype=dtype, device=self.device)
+        # NVLS: four [gmax,*] transport buffers -- agv_h (hidden) / agv_r (routing) / agv_p (probs) / rsv
+        # (combine). Our buf() uses symm_mem.empty (not get_buffer) ONLY so the SAME buffer can be
+        # rendezvoused over many sub-groups; it returns (flat alloc for rendezvous, shaped view for reads).
+        def buf(shape, dtype):
+            flat = symm_mem.empty(shape[0] * shape[1], dtype=dtype, device=dev)
+            return flat, flat.view(*shape)
+        h, self.agv_h = buf((gmax, H), torch.bfloat16)
+        r, self.agv_r = buf((gmax, K), torch.int64)
+        p, self.agv_p = buf((gmax, K), torch.float32)
+        v, self.rsv = buf((gmax, H), torch.bfloat16)
+        self.meta = SymmetricMemoryManager.get_buffer(
+            "vm_meta", process_group=self.group, size_mb=1).maybe_get_tensor([P], torch.int32)
+        if self.meta["handle"] is None:
+            raise RuntimeError("vmcast_1buf metadata symm-mem init failed")
+        self.step_metadata = torch.zeros(3, dtype=torch.int32, device=dev)   # [valid, offset, ep_max]
+        self.rsv.normal_()                    # NVLS: pre-fill rsv so the timed combine reduces real bytes
 
-        self._h = alloc(gcap * H, torch.bfloat16)
-        self._r = alloc(gcap * K, torch.int64)
-        self._p = alloc(gcap * K, torch.float32)
-        self._v = alloc(gcap * H, torch.bfloat16)
-        self.h_local = self._h.view(gcap, H)
-        self.r_local = self._r.view(gcap, K)
-        self.v_local = self._v.view(gcap, H)
-        self._v.normal_()                   # pre-fill rsv so the TIMED combine reduces real bytes
+        # [vmcast] one multicast VA per (buffer, sub-group), ALL aliasing the same allocation.
+        def va_table(t):
+            return torch.tensor([int(symm_mem.rendezvous(t, self.pgs[s]).multicast_ptr)
+                                 for s in self.sizes], dtype=torch.int64, device=dev)
+        self.mc_ptrs_agv_h, self.mc_ptrs_agv_r, self.mc_ptrs_agv_p, self.mc_ptrs_rsv = (
+            va_table(h), va_table(r), va_table(p), va_table(v))
+        self._sizes_t = torch.tensor(self.sizes, dtype=torch.int64, device=dev)   # debug histogram only
 
-        mc_h, mc_r, mc_p, mc_v = {}, {}, {}, {}
-        for s in self.sizes:                # order: per size, rendezvous all four (consistent on members)
-            pg = self.pgs[s]
-            hh = symm_mem.rendezvous(self._h, pg)
-            hr = symm_mem.rendezvous(self._r, pg)
-            hp = symm_mem.rendezvous(self._p, pg)
-            hv = symm_mem.rendezvous(self._v, pg)
-            mc_h[s], mc_r[s], mc_p[s], mc_v[s] = (int(hh.multicast_ptr), int(hr.multicast_ptr),
-                                                  int(hp.multicast_ptr), int(hv.multicast_ptr))
-            if s == P:                      # size-P group == global: its signal pads drive the barrier
-                self.disp_sig = hh.signal_pad_ptrs_dev
-                self.comb_sig = hv.signal_pad_ptrs_dev
+        # [vmcast] per-token selection: the ONLY per-token array is tok_size_idx (which group each token
+        #          picked). The row is offset + t, computed IN-KERNEL from the once/step scalar offset
+        #          (step_metadata[1], exactly like NVLS's AGv) -- no per-token row array. in_probs = id weights.
+        cap = cfg.per_rank_cap
+        self.tok_size_idx = torch.zeros(cap, dtype=torch.int32, device=dev)
+        self.in_probs = torch.ones(cap, K, dtype=torch.float32, device=dev)
 
-        # size-indexed VA tables (gathered per layer by tok_size); the per-token VA arrays (filled in
-        # _layout each layer) and the STATIC global-row slots (routing-independent -> computed once).
-        dev = self.device
-        self._mc_h_by = torch.tensor([mc_h[s] for s in self.sizes], dtype=torch.int64, device=dev)
-        self._mc_r_by = torch.tensor([mc_r[s] for s in self.sizes], dtype=torch.int64, device=dev)
-        self._mc_p_by = torch.tensor([mc_p[s] for s in self.sizes], dtype=torch.int64, device=dev)
-        self._mc_v_by = torch.tensor([mc_v[s] for s in self.sizes], dtype=torch.int64, device=dev)
-        self._sizes_t = torch.tensor(self.sizes, dtype=torch.int64, device=dev)
-        self.tok_mc_h = torch.zeros(cap, dtype=torch.int64, device=dev)
-        self.tok_mc_r = torch.zeros(cap, dtype=torch.int64, device=dev)
-        self.tok_mc_p = torch.zeros(cap, dtype=torch.int64, device=dev)
-        self.tok_mc_v = torch.zeros(cap, dtype=torch.int64, device=dev)
-        self.tok_slot = (rank * cap + torch.arange(cap, device=dev)).to(torch.int32)  # STATIC global rows
-        self.in_probs = torch.ones(cap, K, dtype=torch.float32, device=dev)           # identity weights
-        # scratch for the fused layout kernel (one launch/layer). counts/intra are computed but UNUSED
-        # here (slot is static) -- kept only to reuse the shared vmcast_compute_group kernel.
-        nsz = len(self.sizes)
-        self._counts = torch.zeros(nsz, dtype=torch.int32, device=dev)
-        self._size_idx = torch.zeros(cap, dtype=torch.int32, device=dev)
-        self._intra = torch.zeros(cap, dtype=torch.int32, device=dev)
+        # [vmcast] the single global barrier uses WORLD signal pads (from any size-P rendezvous handle).
+        self.disp_sig = symm_mem.rendezvous(h, self.group).signal_pad_ptrs_dev
+        self.comb_sig = symm_mem.rendezvous(v, self.group).signal_pad_ptrs_dev
         self._built = True
 
-    # -- DEVICE-ONLY per-token layout: tok_size -> gather group VA. No collective, no scan, no offset.
-    #    Runs INSIDE the timed decode_step every layer (honest). tok_slot is static (routing-independent).
+    # -- DEVICE-ONLY per-layer layout: compute tok_size_idx (each token's group). No per-layer collective,
+    #    no scan, no VA gather. Runs INSIDE the timed decode_step every layer (honest). The row (offset + t)
+    #    is computed IN-KERNEL from the once/step offset, not here (it is routing-independent).
     def _layout(self):
         n = self.n
         if n == 0:
             return
-        # ONE Triton launch: per token -> tok_size (bit trick) -> gather its group's four multicast VAs.
-        # Slotless: no atomic/counts/intra (the global row is static), no collective, no host sync.
-        # This IS the honest per-layer layout.
-        vmcast_compute_group_slotless(
-            self.in_routing[:n],
-            (self._mc_h_by, self._mc_r_by, self._mc_p_by, self._mc_v_by),
-            self._size_idx[:n],
-            self.tok_mc_h[:n], self.tok_mc_r[:n], self.tok_mc_p[:n], self.tok_mc_v[:n],
-            self.epr, self.cfg.rank, self.min_group, len(self.sizes))
-        self._last_size_idx = self._size_idx[:n].to(torch.int64)
+        # ONE Triton launch: per token -> tok_size_idx (bit trick on the dest-rank span). No VA gather
+        # (dispatch/combine gather from the menus by this index), no atomic/counts, no collective, no
+        # host sync. This IS the honest per-layer layout.
+        vmcast_compute_size(self.in_routing[:n], self.tok_size_idx[:n],
+                            self.epr, self.cfg.rank, self.min_group, len(self.sizes))
+        self._last_size_idx = self.tok_size_idx[:n].to(torch.int64)
+
+    # -- ONCE-PER-STEP token-count exchange (NVLS parity, timed inside decode_step): fused_metadata_update
+    #    -> rank_token_offset (routing-independent source-count prefix sum); dispatch/combine use it for
+    #    the compacted row = offset + t in-kernel (no per-token row array).
+    def metadata(self):
+        # Populates step_metadata = [valid, rank_token_offset, ep_max]. The dispatch/combine kernels read
+        # step_metadata[1] (rank_token_offset) and compute each token's row = offset + t inline (NVLS-style).
+        fused_metadata_update(local_tokens=self.n, local_buf=self.meta["tensor"],
+                              symm_mem_hdl=self.meta["handle"], step_metadata=self.step_metadata)
 
     # -- per-batch: stage local inputs; bake nothing routing-dependent (layout is per-layer, in-graph) --
     def setup_batch(self, hidden, topk_idx, topk_weights):
@@ -161,34 +166,37 @@ class VMCastOneBufBencher:
     def dispatch(self):
         fused_vmcast_dispatch(
             self.in_hidden, self.in_routing, self.in_probs[:self.n],
-            self.tok_mc_h, self.tok_mc_r, self.tok_mc_p, self.tok_slot,
+            self.mc_ptrs_agv_h, self.mc_ptrs_agv_r, self.mc_ptrs_agv_p,
+            self.tok_size_idx, self.step_metadata[1:2],
             self.n, self.disp_sig, self.cfg.rank, self.cfg.ep_size, self.cfg.per_rank_cap,
             max_num_blocks=self.num_sms)
 
     def combine(self):
         fused_vmcast_combine(
-            self.out, self.tok_mc_v, self.tok_slot, self.n, self.comb_sig,
+            self.out, self.mc_ptrs_rsv, self.tok_size_idx, self.step_metadata[1:2], self.n, self.comb_sig,
             self.cfg.rank, self.cfg.ep_size, self.cfg.per_rank_cap, max_num_blocks=self.num_sms)
 
     def _mask_into_v(self):
         """Identity-expert mask (functional_roundtrip only, untimed): fill the shared rsv region from the
         gathered hidden iff the token routes to a LOCAL expert. Processes all rows; stale/out-of-group
         rows produce garbage that the group-scoped combine never sums."""
-        rank, epr, H = self.cfg.rank, self.epr, self.cfg.hidden
-        rv = self.r_local
+        rank, epr = self.cfg.rank, self.epr
+        rv = self.agv_r
         local = ((rv >= rank * epr) & (rv < (rank + 1) * epr)).any(dim=1)      # [gcap]
-        self.v_local[:] = torch.where(local.view(self.gcap, 1), self.h_local,
-                                      torch.zeros((), device=self.device, dtype=torch.bfloat16))
+        self.rsv[:] = torch.where(local.view(self.gcap, 1), self.agv_h,
+                                  torch.zeros((), device=self.device, dtype=torch.bfloat16))
 
     def step(self):
-        self._layout(); self.dispatch(); self.combine()
+        self.metadata(); self._layout(); self.dispatch(); self.combine()
 
     def decode_step(self, num_layers: int):
+        self.metadata()                                          # once/step: rank_token_offset (in-kernel row)
         for _ in range(num_layers):
             self._layout(); self.dispatch(); self.combine()      # honest: layout re-run per layer
 
     def functional_roundtrip(self, hidden, topk_idx):
         self.setup_batch(hidden, topk_idx, None)
+        self.metadata()
         self.dispatch()
         self._mask_into_v()
         self.combine()
