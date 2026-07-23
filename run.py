@@ -21,6 +21,14 @@ import argparse
 import os
 import sys
 
+# Per-rank node-local Triton cache dir. With 64+ ranks compiling a NEW kernel concurrently
+# against a SHARED cache on /lustre, the compile races ("OSError: [Errno 116] Stale file
+# handle"); crashed ranks then hang the survivors at the next collective. A unique local dir
+# per rank removes the sharing. MUST be set before any triton import (bench_* import triton).
+os.environ.setdefault(
+    "TRITON_CACHE_DIR",
+    f"/tmp/triton_cache_{os.environ.get('SLURM_JOB_ID', '0')}_{os.environ.get('RANK', '0')}")
+
 # NOTE: We intentionally do NOT set EP_DISABLE_GIN. DeepEP-v2 is the "NCCL-Gin"
 # path; the intra-node NVLink (LSA / direct-peer) transport is obtained from the
 # NCCL device communicator that Gin sets up, so disabling Gin can break the v2
@@ -39,9 +47,37 @@ from common import (  # noqa: E402
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--impl", choices=["deepep", "nvls", "nccl", "both", "all"], default="all",
-                   help="which dispatcher(s): deepep | nvls | nccl | both (deepep+nvls) | "
-                        "all (deepep+nvls+nccl)")
+    p.add_argument("--impl", default="all",
+                   help="comma list of deepep|nvls|nccl|hier, or both (deepep+nvls) / "
+                        "all (deepep+nvls+nccl). e.g. --impl nvls,nccl,hier")
+    p.add_argument("--hier-g", type=int, default=2,
+                   help="hierarchical inner-group size g (G=world//g); hier impl only")
+    p.add_argument("--hier-fused", action="store_true",
+                   help="use the fused barrier-free dispatch (K3) for the hier impl")
+    p.add_argument("--hier-fused-max-n", type=int, default=48,
+                   help="use fused dispatch only when max per-rank tokens <= this (else bulk staged)")
+    p.add_argument("--vmcast-min-group", type=int, default=4,
+                   help="smallest nested multicast group size for the vmcast impl")
+    p.add_argument("--routing-block", type=int, default=0,
+                   help="0=uniform routing; L>0 = locality: each token routes only within its "
+                        "source rank's aligned L-rank block (exercises vmcast's smaller multicasts)")
+    p.add_argument("--vmcast-debug", action="store_true",
+                   help="vmcast: print per-batch tok_size histogram (verify routing->group bucketing)")
+    p.add_argument("--vmcast-fused", action="store_true",
+                   help="vmcast: use the fused per-token multicast kernel (1 launch + 1 global barrier "
+                        "instead of one collective per active group size)")
+    p.add_argument("--vmcast-inline-layout", action="store_true",
+                   help="vmcast (fused): compute the per-token group+slot layout ON DEVICE per layer "
+                        "INSIDE the timed decode_step -- the production-honest cost (routing is produced "
+                        "per-layer by the router in the model graph, so it can't be hoisted to setup)")
+    p.add_argument("--routing-unaligned", action="store_true",
+                   help="place the locality window UNALIGNED (source-anchored, random offset) instead of "
+                        "an aligned power-of-2 block -> realistic: vmcast's aligned multicast group can be "
+                        "much larger than the #distinct dest ranks (esp. with small topk)")
+    p.add_argument("--routing-mix", type=str, default="",
+                   help="mixed locality: comma weights over sizes [2,4,..,ep] (ascending); each token draws "
+                        "a block size from these and routes within it. e.g. '0.5,0.25,0.15,0.1'. "
+                        "Overrides --routing-block.")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="148",
@@ -50,6 +86,8 @@ def parse_args():
                         "matching NVLS's fixed block cap)")
     p.add_argument("--num-layers", type=int, default=88,
                    help="MoE layers replayed per decode step (Nemotron-Super = 88)")
+    p.add_argument("--topk", type=int, default=22,
+                   help="experts per token (top-k); default 22. k*8 must be 16-byte aligned.")
     p.add_argument("--reps", type=int, default=100)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--timing", choices=["graph", "eager"], default="graph")
@@ -60,6 +98,20 @@ def parse_args():
                         "(no timing): confirms the isolated dispatch/combine actually "
                         "move/reduce data correctly before trusting the benchmark")
     return p.parse_args()
+
+
+def parse_impls(s):
+    """Expand a comma list of impl tokens (deepep|nvls|nccl|hier, and both/all aliases)."""
+    out = set()
+    for tok in s.split(","):
+        tok = tok.strip()
+        if tok == "both":
+            out |= {"deepep", "nvls"}
+        elif tok == "all":
+            out |= {"deepep", "nvls", "nccl"}
+        elif tok:
+            out.add(tok)
+    return out
 
 
 def timed(fn, group, args):
@@ -79,20 +131,24 @@ def timed(fn, group, args):
 
 def main():
     args = parse_args()
+    impls = parse_impls(args.impl)
 
     # Import deep_ep BEFORE init_process_group. Importing it AFTER torch has
     # initialized its NCCL leaves DeepEP linked against a different NCCL than the
     # one backing the torch process group, and reading that comm handle in
     # _C.calculate_elastic_buffer_size segfaults during ElasticBuffer construction.
-    if args.impl in ("deepep", "both", "all"):
+    if "deepep" in impls:
         import deep_ep  # noqa: F401
 
     group, rank, world, local_rank = init_distributed()
 
     batch_sizes = [int(b) for b in args.batch_sizes.split(",")]
     cfg = Config(
-        ep_size=world, rank=rank, local_rank=local_rank, seed=args.seed,
+        ep_size=world, rank=rank, local_rank=local_rank, seed=args.seed, topk=args.topk,
         per_rank_cap=-(-max(batch_sizes) // world),  # ceil(max_B / ep)
+        routing_block=args.routing_block,
+        routing_mix=args.routing_mix,
+        routing_unaligned=args.routing_unaligned,
     )
     device = torch.device("cuda", local_rank)
 
@@ -112,15 +168,35 @@ def main():
 
     # Build benchers.
     benchers = []
-    if args.impl in ("deepep", "both", "all"):
+    if "deepep" in impls:
         from bench_deepep import DeepEPBencher
         benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
-    if args.impl in ("nvls", "both", "all"):
+    if "nvls" in impls:
         from bench_nvls import NVLSBencher
         benchers.append(NVLSBencher(cfg, group))
-    if args.impl in ("nccl", "all"):
+    if "nccl" in impls:
         from bench_nccl import NCCLBencher
         benchers.append(NCCLBencher(cfg, group))
+    if "hier" in impls:
+        from bench_hier import HierBencher
+        hb = HierBencher(cfg, group, args.hier_g)
+        hb.fused = args.hier_fused        # barrier-free fused dispatch (K3 increment 1)
+        hb.fused_max_n = args.hier_fused_max_n
+        if args.hier_fused:
+            print(f"# hier fused: on for max-per-rank-tokens <= {hb.fused_max_n}, bulk staged above",
+                  flush=True) if cfg.rank == 0 else None
+        if args.hier_fused:
+            hb.name = "hier_fused"
+        benchers.append(hb)
+    if "vmcast" in impls:
+        from bench_vmcast import VMCastBencher
+        benchers.append(VMCastBencher(cfg, group, min_group=args.vmcast_min_group,
+                                      debug=args.vmcast_debug, fused=args.vmcast_fused,
+                                      inline_layout=args.vmcast_inline_layout))
+    if "vmcast1buf" in impls:
+        from bench_vmcast_onebuf import VMCastOneBufBencher
+        benchers.append(VMCastOneBufBencher(cfg, group, min_group=args.vmcast_min_group,
+                                            debug=args.vmcast_debug))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
@@ -153,13 +229,12 @@ def main():
         if len(rt) >= 2:
             E, K, H, epr = cfg.num_experts, cfg.topk, cfg.hidden, cfg.num_experts // world
             for B in (world * 2, 1):
-                n = all_rank_counts(B, world)[rank]
-                gen = torch.Generator(device=device).manual_seed(555 + B + rank * 977)
-                x = (torch.randn(n, H, generator=gen, device=device).to(torch.bfloat16)
-                     if n > 0 else torch.empty(0, H, device=device, dtype=torch.bfloat16))
-                idx = (torch.stack([torch.randperm(E, generator=gen, device=device)[:K]
-                                    for _ in range(n)])
-                       if n > 0 else torch.empty(0, K, device=device, dtype=torch.int64))
+                # Use make_inputs so --routing-block / --routing-mix / --routing-unaligned apply here
+                # too: uniform routing sends ~every token to the size-P group (no stale slots), so the
+                # small-group / stale-slot path (vmcast's risky part) is only exercised under a LOCAL
+                # dist. --validate --routing-block 2 forces every token to size-2 = max stale slots.
+                x, idx, _w = make_inputs(cfg, B, device)
+                n = x.shape[0]
                 # Call every impl's round-trip in a fixed order (all ranks agree -> the
                 # underlying collectives stay in lockstep).
                 outs = {b.name: b.functional_roundtrip(x, idx).to(torch.float32) for b in rt}

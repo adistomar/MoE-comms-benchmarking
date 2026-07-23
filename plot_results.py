@@ -24,8 +24,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.cm as cm  # noqa: E402
 
 IMPL_NAME = {"deepep": "DeepEP-v2 (A2A)", "nvls": "NVLS (AGv/RSv)",
-             "nccl": "NCCL (AllGather)"}
-IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green"}
+             "nccl": "NCCL (AllGather)", "hier": "Hierarchical (AGv-in/A2A-out)"}
+IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
+              "hier": "tab:red"}
 _SUBTITLE = ("EP=4 on 4×B200 · 512 experts · top-k=22 · hidden=1024 · bf16 · "
              "CUDA-graph timing")
 
