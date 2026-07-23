@@ -48,14 +48,8 @@ from common import (  # noqa: E402
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--impl", default="all",
-                   help="comma list of deepep|nvls|nccl|hier, or both (deepep+nvls) / "
-                        "all (deepep+nvls+nccl). e.g. --impl nvls,nccl,hier")
-    p.add_argument("--hier-g", type=int, default=2,
-                   help="hierarchical inner-group size g (G=world//g); hier impl only")
-    p.add_argument("--hier-fused", action="store_true",
-                   help="use the fused barrier-free dispatch (K3) for the hier impl")
-    p.add_argument("--hier-fused-max-n", type=int, default=48,
-                   help="use fused dispatch only when max per-rank tokens <= this (else bulk staged)")
+                   help="comma list of deepep|nvls|nccl, or both (deepep+nvls) / "
+                        "all (deepep+nvls+nccl). e.g. --impl nvls,nccl")
     p.add_argument("--vmcast-min-group", type=int, default=4,
                    help="smallest nested multicast group size for the vmcast impl")
     p.add_argument("--routing-block", type=int, default=0,
@@ -94,7 +88,7 @@ def parse_args():
 
 
 def parse_impls(s):
-    """Expand a comma list of impl tokens (deepep|nvls|nccl|hier, and both/all aliases)."""
+    """Expand a comma list of impl tokens (deepep|nvls|nccl, and both/all aliases)."""
     out = set()
     for tok in s.split(","):
         tok = tok.strip()
@@ -170,17 +164,6 @@ def main():
     if "nccl" in impls:
         from bench_nccl import NCCLBencher
         benchers.append(NCCLBencher(cfg, group))
-    if "hier" in impls:
-        from bench_hier import HierBencher
-        hb = HierBencher(cfg, group, args.hier_g)
-        hb.fused = args.hier_fused        # barrier-free fused dispatch (K3 increment 1)
-        hb.fused_max_n = args.hier_fused_max_n
-        if args.hier_fused:
-            print(f"# hier fused: on for max-per-rank-tokens <= {hb.fused_max_n}, bulk staged above",
-                  flush=True) if cfg.rank == 0 else None
-        if args.hier_fused:
-            hb.name = "hier_fused"
-        benchers.append(hb)
     if "vmcast1buf" in impls:
         from bench_vmcast_onebuf import VMCastOneBufBencher
         benchers.append(VMCastOneBufBencher(cfg, group, min_group=args.vmcast_min_group,

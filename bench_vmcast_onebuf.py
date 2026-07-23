@@ -113,14 +113,13 @@ class VMCastOneBufBencher:
 
         # [vmcast] per-token selection: the ONLY per-token array is tok_size_idx (which group each token
         #          picked). The row is offset + t, computed IN-KERNEL from the once/step scalar offset
-        #          (step_metadata[1], exactly like NVLS's AGv) -- no per-token row array. in_probs = id weights.
+        #          (step_metadata[1], exactly like NVLS's AGv) -- no per-token row array.
         cap = cfg.per_rank_cap
         self.tok_size_idx = torch.zeros(cap, dtype=torch.int32, device=dev)
-        self.in_probs = torch.ones(cap, K, dtype=torch.float32, device=dev)
 
         # [vmcast] the single global barrier uses WORLD signal pads (from any size-P rendezvous handle).
-        self.disp_sig = symm_mem.rendezvous(h, self.group).signal_pad_ptrs_dev
-        self.comb_sig = symm_mem.rendezvous(v, self.group).signal_pad_ptrs_dev
+        self.disp_signal_pads = symm_mem.rendezvous(h, self.group).signal_pad_ptrs_dev
+        self.comb_signal_pads = symm_mem.rendezvous(v, self.group).signal_pad_ptrs_dev
         self._built = True
 
     # -- DEVICE-ONLY per-layer layout: compute tok_size_idx (each token's group). No per-layer collective,
@@ -153,6 +152,7 @@ class VMCastOneBufBencher:
         self.n = hidden.shape[0]
         self.in_hidden = hidden.contiguous()
         self.in_routing = topk_idx.to(torch.int64).contiguous()
+        self.in_probs = topk_weights.contiguous()   # NVLS: store the passed weights (real, or ones in validate)
         self.out = torch.zeros(self.n, self.cfg.hidden, dtype=torch.bfloat16, device=dev)
         self._layout()                      # also run once now (warmup/capture arrays + debug)
         if self.debug and self.cfg.rank == 0 and self.n > 0 and self.n not in self._dbg_seen:
@@ -165,15 +165,15 @@ class VMCastOneBufBencher:
 
     def dispatch(self):
         fused_vmcast_dispatch(
-            self.in_hidden, self.in_routing, self.in_probs[:self.n],
+            self.in_hidden, self.in_routing, self.in_probs,
             self.mc_ptrs_agv_h, self.mc_ptrs_agv_r, self.mc_ptrs_agv_p,
             self.tok_size_idx, self.step_metadata[1:2],
-            self.n, self.disp_sig, self.cfg.rank, self.cfg.ep_size, self.cfg.per_rank_cap,
+            self.n, self.disp_signal_pads, self.cfg.rank, self.cfg.ep_size, self.cfg.per_rank_cap,
             max_num_blocks=self.num_sms)
 
     def combine(self):
         fused_vmcast_combine(
-            self.out, self.mc_ptrs_rsv, self.tok_size_idx, self.step_metadata[1:2], self.n, self.comb_sig,
+            self.out, self.mc_ptrs_rsv, self.tok_size_idx, self.step_metadata[1:2], self.n, self.comb_signal_pads,
             self.cfg.rank, self.cfg.ep_size, self.cfg.per_rank_cap, max_num_blocks=self.num_sms)
 
     def _mask_into_v(self):
@@ -195,12 +195,14 @@ class VMCastOneBufBencher:
             self._layout(); self.dispatch(); self.combine()      # honest: layout re-run per layer
 
     def functional_roundtrip(self, hidden, topk_idx):
-        self.setup_batch(hidden, topk_idx, None)
+        n, K = hidden.shape[0], self.cfg.topk
+        self.setup_batch(hidden, topk_idx,
+                         torch.ones(n, K, dtype=torch.float32, device=self.device))
         self.metadata()
         self.dispatch()
         self._mask_into_v()
         self.combine()
-        return self.out[:self.n]
+        return self.out
 
     def validate(self):
         w, rank, dev = self.cfg.ep_size, self.cfg.rank, self.device
