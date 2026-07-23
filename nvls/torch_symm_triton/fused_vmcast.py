@@ -58,26 +58,28 @@ def _vmcast_size_kernel(
     That single index is the only routing-dependent per-token value; dispatch/combine gather the actual
     VAs from the per-size menus (mc_ptrs_*) by it. No VA gather / atomic / counts here."""
     pid = tl.program_id(0)
-    if pid * BLOCK >= n_tokens:          # whole block is past the valid tokens (mask all-0): skip an over-provisioned grid
-        return
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_tokens
+    num_prog = tl.num_programs(0)
     rp = in_routing_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
     si_out = size_idx_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    # Vectorized: load the whole [BLOCK, K] routing tile in ONE coalesced 2D load (KK = K padded up to a
-    # power of 2 for tl.arange; pad columns read RANK*EPR -> dest rank RANK, harmless to the span), then
-    # reduce experts -> dest ranks and take the min/max dest-rank over the token's K experts.
-    kk = tl.arange(0, KK)
+    kk = tl.arange(0, KK)                              # KK = next_pow2(K); pad cols (kk >= K) masked below
     col = kk < K
-    e = tl.load(rp + offs[:, None] * K + kk[None, :], mask=mask[:, None] & col[None, :], other=RANK * EPR)
-    d = e // EPR                                       # [BLOCK, K] dest ranks
-    lo = tl.minimum(tl.min(d, axis=1), RANK)           # smallest dest rank (source RANK folded in)
-    hi = tl.maximum(tl.max(d, axis=1), RANK)           # largest  dest rank (source RANK folded in)
-    diff = lo ^ hi
-    size_idx = tl.full((BLOCK,), NSZ - 1, tl.int32)
-    for i in range(NSZ - 1, -1, -1):
-        size_idx = tl.where(diff < (MIN_GROUP << i), i, size_idx)
-    tl.store(si_out + offs, size_idx, mask=mask)
+    # Grid-stride over BLOCK-sized token chunks so a CAPPED grid (wrapper caps it at MAX_NUM_BLOCKS) still
+    # covers every token; a chunk past n_tokens is an empty range that does nothing (subsumes the old
+    # per-block early return). Each chunk loads the whole [BLOCK, K] routing tile in ONE coalesced 2D load
+    # (pad columns read RANK*EPR -> dest rank RANK, harmless to the span), reduces experts -> dest ranks,
+    # and takes the min/max dest-rank over the token's K experts (source RANK folded in).
+    for base in range(pid * BLOCK, n_tokens, num_prog * BLOCK):
+        offs = base + tl.arange(0, BLOCK)
+        mask = offs < n_tokens
+        e = tl.load(rp + offs[:, None] * K + kk[None, :], mask=mask[:, None] & col[None, :], other=RANK * EPR)
+        d = e // EPR                                   # [BLOCK, K] dest ranks
+        lo = tl.minimum(tl.min(d, axis=1), RANK)       # smallest dest rank (source RANK folded in)
+        hi = tl.maximum(tl.max(d, axis=1), RANK)       # largest  dest rank (source RANK folded in)
+        diff = lo ^ hi
+        size_idx = tl.full((BLOCK,), NSZ - 1, tl.int32)
+        for i in range(NSZ - 1, -1, -1):
+            size_idx = tl.where(diff < (MIN_GROUP << i), i, size_idx)
+        tl.store(si_out + offs, size_idx, mask=mask)
 
 
 def vmcast_compute_size(in_routing, size_idx, epr, rank, min_group, nsz):
@@ -86,7 +88,9 @@ def vmcast_compute_size(in_routing, size_idx, epr, rank, min_group, nsz):
     assert HAVE_TRITON
     n, K = in_routing.shape
     BLOCK = 256
-    grid = ((n + BLOCK - 1) // BLOCK, 1, 1)
+    # Cap the grid (in_routing can be worst-case-sized -> too many blocks is bad on Blackwell). The kernel
+    # is grid-stride, so <= MAX_NUM_BLOCKS blocks still cover all n tokens.
+    grid = (min((n + BLOCK - 1) // BLOCK, MAX_NUM_BLOCKS), 1, 1)
     _vmcast_size_kernel[grid](
         in_routing.data_ptr(), size_idx.data_ptr(),
         n, K=K, EPR=epr, RANK=rank, MIN_GROUP=min_group, NSZ=nsz, BLOCK=BLOCK,
