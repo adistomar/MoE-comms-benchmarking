@@ -62,7 +62,7 @@ srun --ntasks="$(( NNODES * 4 ))" --ntasks-per-node=4 --cpus-per-task=36 \
         export TRITON_CACHE_DIR=/tmp/triton_cache_rank\${SLURM_PROCID}
         source ./deepep_env.sh
         cd '$BENCH_DIR'
-        python3 run.py --impl all \
+        python3 run.py --impl nvls,deepep,a2av,a2av_rs \
             --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576 \
             --deepep-num-sms 148 --num-layers 88 \
             --reps 20 --warmup 6 --timing graph \

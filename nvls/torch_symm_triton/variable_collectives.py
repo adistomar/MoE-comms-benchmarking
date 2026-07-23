@@ -33,7 +33,7 @@ except ImportError:
     _SymmetricMemory = MagicMock()
 
 from .barrier import symm_mem_sync
-from .multimem_asm import ld_64, ld_128, st_64, st_128
+from .multimem_asm import ld_64, ld_128, ld_128_p2p, st_64, st_128, st_128_p2p
 from .utils import is_device_nvls_capable, sync_threads
 
 
@@ -801,3 +801,540 @@ def multimem_all_gatherv_3tensor(
     )
 
     return output_tensor_0, output_tensor_1, output_tensor_2
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# All-to-all-v collectives (dense layout, routing-driven unicast)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These mirror the all-gather-v / reduce-scatter-v kernels above but move the HIDDEN
+# activations by *unicast* to only a token's destination ranks, instead of multicasting
+# to every rank. Everything else is kept identical to the NVLS path so the surrounding
+# harness (metadata, dense layout, vLLM compute) is untouched:
+#
+#   * DENSE layout: a token from this rank at local index t lands at the SAME global
+#     offset `rank_token_offset + t` on every destination rank (source-based, never
+#     compacted), exactly like AGV. Only the store TARGET changes: the multicast pointer
+#     (fans out to all ranks) becomes `buffer_ptrs_dev[d]` for each destination rank d
+#     (fans out to none — we place each copy ourselves).
+#   * ROUTING + PROBS stay full all-gather-v (multicast): every rank sees every token's
+#     routing so the compute writes 0-or-sum everywhere and combine works unchanged.
+#   * DESTINATION ranks are derived on-device from a token's top-k experts
+#     (expert // experts_per_rank), deduplicated implicitly: `routes_to_d` is a
+#     block-reduction over the token's experts, so each rank is considered once. A
+#     non-destination rank's store/load is predicated off (all-lane-false mask) and
+#     therefore generates NO NVLink traffic (the p2p asm skips the memory op per lane).
+
+
+@triton.jit
+def _pack_bf16x2(hi, lo):
+    """Pack two fp32 blocks into one uint32 block of bf16x2 (round-to-nearest).
+
+    hi -> bits [31:16], lo -> bits [15:0]. Mirrors the pack in fused_collectives'
+    apply_norm; used to store the fp32-accumulated pull-combine result as bf16.
+    """
+    hi_u = (hi.cast(tl.bfloat16).cast(tl.uint16, bitcast=True).cast(tl.uint32)) << 16
+    lo_u = lo.cast(tl.bfloat16).cast(tl.uint16, bitcast=True).cast(tl.uint32)
+    return hi_u | lo_u
+
+
+@triton.jit
+def _unpack_bf16x2(x, mask):
+    """Unpack a uint32 block of bf16x2 into (hi_fp32, lo_fp32); masked lanes -> 0.
+
+    Local copy of fused_collectives.unpack_bf16x2 (kept here to avoid a cross-module
+    import). `x * mask` forces masked-off / non-destination lanes to 0 so they contribute
+    nothing to the accumulator.
+    """
+    x = x * mask
+    x_hi = (x >> 16).cast(tl.uint16).cast(tl.bfloat16, bitcast=True).cast(tl.float32)
+    x_lo = x.cast(tl.uint16).cast(tl.bfloat16, bitcast=True).cast(tl.float32)
+    return x_hi, x_lo
+
+
+@triton.jit
+def _or_combine(a, b):
+    """Bitwise-OR reduction operator for tl.reduce (folds a token's per-expert
+    destination-rank bits into a single WORLD_SIZE-wide mask)."""
+    return a | b
+
+
+@triton.jit
+def _multimem_a2av_dispatch_3tensor_kernel(
+    local_ptr_h,
+    buffer_ptrs_h,
+    output_byte_offset_h,
+    local_ptr_r,
+    multicast_ptr_r,
+    output_byte_offset_r,
+    local_ptr_p,
+    multicast_ptr_p,
+    output_byte_offset_p,
+    signal_pad_ptrs,
+    local_tokens,
+    rank_token_offset_ptr,
+    ep_max_tokens_ptr,
+    HIDDEN_SIZE_H: tl.constexpr,
+    HIDDEN_SIZE_R: tl.constexpr,
+    HIDDEN_SIZE_P: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUMEL_PER_THREAD_H: tl.constexpr,
+    NUMEL_PER_THREAD_R: tl.constexpr,
+    NUMEL_PER_THREAD_P: tl.constexpr,
+    BITS_R: tl.constexpr,
+    BITS_P: tl.constexpr,
+    TOPK: tl.constexpr,
+    EXPERTS_PER_RANK: tl.constexpr,
+    RANK: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+):
+    """All-to-all-v dispatch: unicast HIDDEN to a token's destination ranks; multicast
+    (all-gather-v) ROUTING and PROBS to every rank. One CTA per token, persistent grid.
+
+    HIDDEN is always the 128-bit path (row is 16-byte aligned). ROUTING/PROBS pick 128 or
+    64 bits per their row alignment (BITS_R / BITS_P), matching the AGV-3tensor kernel. A
+    single end-of-kernel barrier (release/acquire) publishes all writes.
+    """
+    pid = tl.program_id(axis=0)
+    ep_max_tokens = tl.load(ep_max_tokens_ptr)
+    if pid >= ep_max_tokens:
+        return
+
+    # Required Triton-3.6 fix: widen raw pointer int args to i64 (tt.int_to_ptr needs i64).
+    local_ptr_h = local_ptr_h.to(tl.int64)
+    buffer_ptrs_h = buffer_ptrs_h.to(tl.int64)
+    local_ptr_r = local_ptr_r.to(tl.int64)
+    multicast_ptr_r = multicast_ptr_r.to(tl.int64)
+    local_ptr_p = local_ptr_p.to(tl.int64)
+    multicast_ptr_p = multicast_ptr_p.to(tl.int64)
+
+    tid = tl.arange(0, BLOCK_SIZE)
+    rank_token_offset = tl.load(rank_token_offset_ptr)
+
+    numel_per_token_h = tl.cdiv(HIDDEN_SIZE_H, NUMEL_PER_THREAD_H)
+    numel_per_token_r = tl.cdiv(HIDDEN_SIZE_R, NUMEL_PER_THREAD_R)
+    numel_per_token_p = tl.cdiv(HIDDEN_SIZE_P, NUMEL_PER_THREAD_P)
+    local_numel_h = local_tokens * numel_per_token_h
+    local_numel_r = local_tokens * numel_per_token_r
+    local_numel_p = local_tokens * numel_per_token_p
+    channel_mask_h = tid < numel_per_token_h
+    channel_mask_r = tid < numel_per_token_r
+    channel_mask_p = tid < numel_per_token_p
+
+    # Per-rank base pointers of the HIDDEN symmetric buffer (int64 array), and this rank's
+    # local routing rows (int64 expert ids) used to derive destination ranks.
+    buffer_ptrs_h_i64 = buffer_ptrs_h.to(tl.pointer_type(tl.int64))
+    routing_row_ptr = local_ptr_r.to(tl.pointer_type(tl.int64))
+
+    for token_offset in range(pid, local_tokens, tl.num_programs(axis=0)):
+        # --- Destination ranks for this token (dedup implicit via routes_to_d) ---
+        experts = tl.load(routing_row_ptr + token_offset * TOPK + tid, mask=tid < TOPK, other=-1)
+        dest = tl.where(experts >= 0, experts // EXPERTS_PER_RANK, -1)
+
+        # --- HIDDEN: all-to-all-v unicast (load each 128-bit chunk once, send to each dest) ---
+        for channel_offset in range(0, numel_per_token_h, BLOCK_SIZE):
+            local_offsets = token_offset * numel_per_token_h + channel_offset + tid
+            token_mask = local_offsets < local_numel_h
+            mask = token_mask & channel_mask_h
+            global_offsets = rank_token_offset * numel_per_token_h + local_offsets
+            local_ptrs = local_ptr_h.to(tl.pointer_type(tl.uint64)) + local_offsets * 2
+            (x, y, z, w) = ld_128(local_ptrs, mask=mask, multicast_op=False)
+            for d in range(WORLD_SIZE):
+                routes_to_d = tl.max(tl.where(dest == d, 1, 0)) == 1
+                send_mask = mask & routes_to_d  # all-false (no NVLink traffic) if not a dest
+                peer_base = tl.load(buffer_ptrs_h_i64 + d)
+                peer_ptrs = (
+                    peer_base.to(tl.pointer_type(tl.uint64))
+                    + output_byte_offset_h // 8
+                    + global_offsets * 2
+                )
+                st_128_p2p(peer_ptrs, x, y, z, w, mask=send_mask)
+
+        # --- ROUTING: all-gather-v multicast ---
+        for channel_offset in range(0, numel_per_token_r, BLOCK_SIZE):
+            local_offsets = token_offset * numel_per_token_r + channel_offset + tid
+            token_mask = local_offsets < local_numel_r
+            mask = token_mask & channel_mask_r
+            global_offsets = rank_token_offset * numel_per_token_r + local_offsets
+            if BITS_R == 128:
+                multicast_ptrs = (
+                    multicast_ptr_r.to(tl.pointer_type(tl.uint64))
+                    + output_byte_offset_r // 8
+                    + global_offsets * 2
+                )
+                local_ptrs = local_ptr_r.to(tl.pointer_type(tl.uint64)) + local_offsets * 2
+                (x, y, z, w) = ld_128(local_ptrs, mask=mask, multicast_op=False)
+                st_128(multicast_ptrs, x, y, z, w, mask=mask, multicast_op=True)
+            else:
+                multicast_ptrs = (
+                    multicast_ptr_r.to(tl.pointer_type(tl.uint64))
+                    + output_byte_offset_r // 8
+                    + global_offsets
+                )
+                local_ptrs = local_ptr_r.to(tl.pointer_type(tl.uint64)) + local_offsets
+                (x, y) = ld_64(local_ptrs, mask=mask)
+                st_64(multicast_ptrs, x, y, mask=mask, multicast_op=True)
+
+        # --- PROBS: all-gather-v multicast ---
+        for channel_offset in range(0, numel_per_token_p, BLOCK_SIZE):
+            local_offsets = token_offset * numel_per_token_p + channel_offset + tid
+            token_mask = local_offsets < local_numel_p
+            mask = token_mask & channel_mask_p
+            global_offsets = rank_token_offset * numel_per_token_p + local_offsets
+            if BITS_P == 128:
+                multicast_ptrs = (
+                    multicast_ptr_p.to(tl.pointer_type(tl.uint64))
+                    + output_byte_offset_p // 8
+                    + global_offsets * 2
+                )
+                local_ptrs = local_ptr_p.to(tl.pointer_type(tl.uint64)) + local_offsets * 2
+                (x, y, z, w) = ld_128(local_ptrs, mask=mask, multicast_op=False)
+                st_128(multicast_ptrs, x, y, z, w, mask=mask, multicast_op=True)
+            else:
+                multicast_ptrs = (
+                    multicast_ptr_p.to(tl.pointer_type(tl.uint64))
+                    + output_byte_offset_p // 8
+                    + global_offsets
+                )
+                local_ptrs = local_ptr_p.to(tl.pointer_type(tl.uint64)) + local_offsets
+                (x, y) = ld_64(local_ptrs, mask=mask)
+                st_64(multicast_ptrs, x, y, mask=mask, multicast_op=True)
+
+    sync_threads()
+    symm_mem_sync(
+        signal_pad_ptrs,
+        None,
+        RANK,
+        WORLD_SIZE,
+        hasPreviousMemAccess=True,
+        hasSubsequentMemAccess=True,
+    )
+
+
+def multimem_a2av_dispatch_3tensor(
+    output_tensor_h: torch.Tensor,
+    output_tensor_r: torch.Tensor,
+    output_tensor_p: torch.Tensor,
+    input_tensor_h: torch.Tensor,
+    input_tensor_r: torch.Tensor,
+    input_tensor_p: torch.Tensor,
+    symm_mem_hdl_h: _SymmetricMemory,
+    symm_mem_hdl_r: _SymmetricMemory,
+    symm_mem_hdl_p: _SymmetricMemory,
+    rank_token_offset: torch.Tensor,
+    ep_max_tokens: torch.Tensor,
+    per_rank_max_tokens: int,
+    num_experts: int,
+    output_byte_offset_h: int = 0,
+    output_byte_offset_r: int = 0,
+    output_byte_offset_p: int = 0,
+    **kwargs,
+) -> tuple:
+    """All-to-all-v dispatch of HIDDEN + all-gather-v of ROUTING/PROBS in one kernel/barrier.
+
+    HIDDEN (input_tensor_h, bf16) is unicast to each token's destination ranks using
+    symm_mem_hdl_h.buffer_ptrs_dev (per-rank base pointers of the hidden symmetric buffer).
+    ROUTING (input_tensor_r, int64 expert ids) and PROBS (input_tensor_p, fp32) are multicast
+    to every rank exactly as multimem_all_gatherv_3tensor does. Destination ranks are derived
+    on-device from routing: expert // (num_experts // world_size).
+
+    Layout is DENSE and identical to AGV: this rank's token t -> global offset
+    rank_token_offset + t on every destination rank.
+    """
+    assert HAVE_TRITON, "Triton is required for multimem all-to-all-v dispatch."
+    assert (
+        input_tensor_h.ndim == 2 and input_tensor_r.ndim == 2 and input_tensor_p.ndim == 2
+    ), "inputs must be 2-D [tokens, hidden]."
+    assert is_device_nvls_capable(
+        input_tensor_h.device
+    ), "multimem_a2av_dispatch_3tensor requires a Hopper+ GPU with NVLink (SM >= 9)."
+    assert (
+        rank_token_offset.numel() == 1
+        and rank_token_offset.dtype == torch.int32
+        and rank_token_offset.is_cuda
+    ), "rank_token_offset must be a scalar int32 CUDA tensor."
+    assert hasattr(symm_mem_hdl_h, "buffer_ptrs_dev"), (
+        "symmetric-memory handle has no buffer_ptrs_dev; the installed torch build does not "
+        "expose per-rank symmetric pointers required for all-to-all-v unicast."
+    )
+
+    world_size = symm_mem_hdl_h.world_size
+    assert num_experts % world_size == 0, "num_experts must be divisible by world_size."
+    experts_per_rank = num_experts // world_size
+    topk = input_tensor_r.shape[1]
+
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    MAX_BLOCK_SIZE = 1024
+    WARP_SIZE = 32
+
+    local_tokens = input_tensor_h.shape[0]
+
+    # HIDDEN: 128-bit path only (the p2p unicast primitive is 128-bit).
+    hidden_h = input_tensor_h.shape[1]
+    row_bytes_h = hidden_h * input_tensor_h.element_size()
+    assert row_bytes_h % 16 == 0, (
+        f"Hidden row ({hidden_h} x {input_tensor_h.element_size()}B = {row_bytes_h}B) must be "
+        f"16-byte aligned for the all-to-all-v 128-bit path."
+    )
+    numel_per_thread_h = 128 // (input_tensor_h.element_size() * 8)
+    numel_per_token_h = (hidden_h + numel_per_thread_h - 1) // numel_per_thread_h
+    block_size_h = min(triton.next_power_of_2(numel_per_token_h), MAX_BLOCK_SIZE)
+
+    def _agv_params(inp):
+        hidden = inp.shape[1]
+        row_bytes = hidden * inp.element_size()
+        assert row_bytes % 8 == 0, "AGV tensor row must be 8-byte aligned."
+        bits = 128 if row_bytes % 16 == 0 else 64
+        npt = bits // (inp.element_size() * 8)
+        numel_per_token = (hidden + npt - 1) // npt
+        block_size = min(triton.next_power_of_2(numel_per_token), MAX_BLOCK_SIZE)
+        return hidden, bits, npt, block_size
+
+    hidden_r, bits_r, npt_r, block_size_r = _agv_params(input_tensor_r)
+    hidden_p, bits_p, npt_p, block_size_p = _agv_params(input_tensor_p)
+
+    # Block must cover the widest tensor AND the top-k lanes (experts are read into lanes < TOPK).
+    block_size = max(block_size_h, block_size_r, block_size_p, triton.next_power_of_2(topk))
+    num_warps = max(1, block_size // WARP_SIZE)
+    num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS)
+
+    _multimem_a2av_dispatch_3tensor_kernel[(num_blocks, 1, 1)](
+        input_tensor_h.data_ptr(),
+        symm_mem_hdl_h.buffer_ptrs_dev,
+        output_byte_offset_h,
+        input_tensor_r.data_ptr(),
+        symm_mem_hdl_r.multicast_ptr,
+        output_byte_offset_r,
+        input_tensor_p.data_ptr(),
+        symm_mem_hdl_p.multicast_ptr,
+        output_byte_offset_p,
+        symm_mem_hdl_h.signal_pad_ptrs_dev,
+        local_tokens=local_tokens,
+        rank_token_offset_ptr=rank_token_offset,
+        ep_max_tokens_ptr=ep_max_tokens,
+        HIDDEN_SIZE_H=hidden_h,
+        HIDDEN_SIZE_R=hidden_r,
+        HIDDEN_SIZE_P=hidden_p,
+        BLOCK_SIZE=block_size,
+        NUMEL_PER_THREAD_H=numel_per_thread_h,
+        NUMEL_PER_THREAD_R=npt_r,
+        NUMEL_PER_THREAD_P=npt_p,
+        BITS_R=bits_r,
+        BITS_P=bits_p,
+        TOPK=topk,
+        EXPERTS_PER_RANK=experts_per_rank,
+        RANK=symm_mem_hdl_h.rank,
+        WORLD_SIZE=world_size,
+        num_warps=num_warps,
+    )
+    return output_tensor_h, output_tensor_r, output_tensor_p
+
+
+@triton.jit
+def _multimem_a2av_pull_combine_kernel(
+    output_ptr,
+    buffer_ptrs_out,
+    routing_local_ptr,
+    signal_pad_ptrs,
+    local_tokens,
+    rank_token_offset_ptr,
+    ep_max_tokens_ptr,
+    input_byte_offset,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUMEL_PER_THREAD: tl.constexpr,
+    TOPK: tl.constexpr,
+    EXPERTS_PER_RANK: tl.constexpr,
+    RANK: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+):
+    """All-to-all-v pull combine: for each of THIS rank's tokens, read its expert output
+    from only its destination ranks' symmetric output buffers (at the same dense global
+    offset), sum in fp32, and write the bf16 result to local memory.
+
+    Mirror image of the RSV kernel: instead of a switch-reduce over ALL peers, it pulls
+    from `<= topk` deduplicated destination ranks via per-peer unicast loads. The barrier
+    runs FIRST (wait for all ranks' expert outputs); there is no end barrier (the next
+    dispatch's end barrier interlocks). fp32 accumulation matches NVLS RSV's acc::f32.
+    """
+    pid = tl.program_id(axis=0)
+    ep_max_tokens = tl.load(ep_max_tokens_ptr)
+    if pid >= ep_max_tokens:
+        return
+
+    # Required Triton-3.6 fix: widen raw pointer int args to i64.
+    output_ptr = output_ptr.to(tl.int64)
+    buffer_ptrs_out = buffer_ptrs_out.to(tl.int64)
+    routing_local_ptr = routing_local_ptr.to(tl.int64)
+
+    # Wait for all ranks to have written their expert outputs before pulling.
+    symm_mem_sync(
+        signal_pad_ptrs,
+        None,
+        RANK,
+        WORLD_SIZE,
+        hasPreviousMemAccess=False,
+        hasSubsequentMemAccess=False,
+    )
+    sync_threads()
+
+    tid = tl.arange(0, BLOCK_SIZE)
+    rank_token_offset = tl.load(rank_token_offset_ptr)
+    numel_per_token = tl.cdiv(HIDDEN_SIZE, NUMEL_PER_THREAD)
+    local_numel = local_tokens * numel_per_token
+    channel_mask = tid < numel_per_token
+
+    buffer_ptrs_out_i64 = buffer_ptrs_out.to(tl.pointer_type(tl.int64))
+    routing_row_ptr = routing_local_ptr.to(tl.pointer_type(tl.int64))
+
+    for token_offset in range(pid, local_tokens, tl.num_programs(axis=0)):
+        experts = tl.load(routing_row_ptr + token_offset * TOPK + tid, mask=tid < TOPK, other=-1)
+        dest = tl.where(experts >= 0, experts // EXPERTS_PER_RANK, -1)
+        # Destination-rank bitmask for this token, computed ONCE (WORLD_SIZE <= 64 -> uint64).
+        # Replaces the per-rank block reduction `tl.max(tl.where(dest==d,...))` that used to run
+        # INSIDE the d-loop below -- that was WORLD_SIZE CTA-wide barriers per token, which
+        # serialized the remote pulls so each of the <= topk real loads paid full NVLink latency
+        # in series. With the mask precomputed, the d-loop's destination test is a barrier-free
+        # bit lookup, so the real pulls can pipeline (overlap latency). Rank dedup is automatic
+        # (OR): a rank hit by several of the token's experts still contributes one set bit.
+        safe_dest = tl.where(dest >= 0, dest, 0).to(tl.uint64)
+        dest_bit = tl.where(dest >= 0,
+                            tl.full([BLOCK_SIZE], 1, tl.uint64) << safe_dest,
+                            tl.zeros([BLOCK_SIZE], tl.uint64))
+        dest_mask = tl.reduce(dest_bit, 0, _or_combine)  # scalar uint64; ONE reduction per token
+        program_offset = token_offset * numel_per_token
+        for channel_offset in range(0, numel_per_token, BLOCK_SIZE):
+            local_offsets = program_offset + channel_offset + tid
+            token_mask = local_offsets < local_numel
+            mask = token_mask & channel_mask
+            global_offsets = rank_token_offset * numel_per_token + local_offsets
+
+            # fp32 accumulators: one (hi, lo) pair per 32-bit word of the 128-bit chunk.
+            acc_x_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_x_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_y_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_y_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_z_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_z_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_w_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+            acc_w_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+
+            for d in range(WORLD_SIZE):
+                routes_to_d = ((dest_mask >> d) & 1) == 1  # barrier-free bit test (no reduction)
+                pull_mask = mask & routes_to_d  # all-false (no NVLink traffic) if not a dest
+                peer_base = tl.load(buffer_ptrs_out_i64 + d)
+                peer_ptrs = (
+                    peer_base.to(tl.pointer_type(tl.uint64))
+                    + input_byte_offset // 8
+                    + global_offsets * 2
+                )
+                (x, y, z, w) = ld_128_p2p(peer_ptrs, mask=pull_mask)
+                x_hi, x_lo = _unpack_bf16x2(x, pull_mask)
+                y_hi, y_lo = _unpack_bf16x2(y, pull_mask)
+                z_hi, z_lo = _unpack_bf16x2(z, pull_mask)
+                w_hi, w_lo = _unpack_bf16x2(w, pull_mask)
+                acc_x_hi += x_hi
+                acc_x_lo += x_lo
+                acc_y_hi += y_hi
+                acc_y_lo += y_lo
+                acc_z_hi += z_hi
+                acc_z_lo += z_lo
+                acc_w_hi += w_hi
+                acc_w_lo += w_lo
+
+            out_x = _pack_bf16x2(acc_x_hi, acc_x_lo)
+            out_y = _pack_bf16x2(acc_y_hi, acc_y_lo)
+            out_z = _pack_bf16x2(acc_z_hi, acc_z_lo)
+            out_w = _pack_bf16x2(acc_w_hi, acc_w_lo)
+            local_ptrs = output_ptr.to(tl.pointer_type(tl.uint64)) + local_offsets * 2
+            st_128(local_ptrs, out_x, out_y, out_z, out_w, mask=mask, multicast_op=False)
+
+
+def multimem_a2av_combine(
+    output_tensor: torch.Tensor,
+    input_tensor: torch.Tensor,
+    routing: torch.Tensor,
+    symm_mem_hdl: _SymmetricMemory,
+    rank_token_offset: torch.Tensor,
+    ep_max_tokens: torch.Tensor,
+    per_rank_max_tokens: int,
+    num_experts: int,
+    input_byte_offset: int = 0,
+    **kwargs,
+) -> torch.Tensor:
+    """All-to-all-v pull combine for a single 2-D bf16 tensor.
+
+    For each of THIS rank's local tokens, read the token's expert output from only its
+    destination ranks' copies of the symmetric output buffer (same dense global offset),
+    sum in fp32, and write bf16 to output_tensor. Destination ranks are derived from
+    `routing` (this rank's [local_tokens, topk] expert ids), deduplicated.
+
+    output_tensor: local output [local_tokens, hidden] bf16 (regular tensor).
+    input_tensor : the symmetric output buffer [global_tokens, hidden] bf16 (used for
+                   shape/dtype checks; the actual reads use symm_mem_hdl.buffer_ptrs_dev).
+    routing      : local [local_tokens, topk] int64 expert ids.
+    """
+    assert HAVE_TRITON, "Triton is required for multimem all-to-all-v combine."
+    assert output_tensor.ndim == 2 and input_tensor.ndim == 2, "tensors must be 2-D."
+    assert is_device_nvls_capable(
+        output_tensor.device
+    ), "multimem_a2av_combine requires a Hopper+ GPU with NVLink (SM >= 9)."
+    assert (
+        rank_token_offset.numel() == 1
+        and rank_token_offset.dtype == torch.int32
+        and rank_token_offset.is_cuda
+    ), "rank_token_offset must be a scalar int32 CUDA tensor."
+    assert (
+        output_tensor.dtype == torch.bfloat16 and input_tensor.dtype == torch.bfloat16
+    ), f"a2av combine is bf16-only, got {output_tensor.dtype}/{input_tensor.dtype}."
+    assert hasattr(symm_mem_hdl, "buffer_ptrs_dev"), (
+        "symmetric-memory handle has no buffer_ptrs_dev; the installed torch build does not "
+        "expose per-rank symmetric pointers required for all-to-all-v pull combine."
+    )
+
+    hidden_size = output_tensor.shape[1]
+    assert input_tensor.shape[1] == hidden_size, "hidden mismatch."
+    row_bytes = hidden_size * output_tensor.element_size()
+    assert row_bytes % 16 == 0, (
+        f"Hidden row ({hidden_size} x {output_tensor.element_size()}B = {row_bytes}B) must be "
+        f"16-byte aligned for the all-to-all-v 128-bit path."
+    )
+    world_size = symm_mem_hdl.world_size
+    assert num_experts % world_size == 0, "num_experts must be divisible by world_size."
+    assert world_size <= 64, (
+        "pull combine encodes destination ranks in a uint64 bitmask; WORLD_SIZE must be <= 64."
+    )
+    experts_per_rank = num_experts // world_size
+    topk = routing.shape[1]
+
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    MAX_BLOCK_SIZE = 1024
+    WARP_SIZE = 32
+
+    local_tokens = output_tensor.shape[0]
+    numel_per_thread = 128 // (output_tensor.element_size() * 8)
+    numel_per_token = (hidden_size + numel_per_thread - 1) // numel_per_thread
+    block_size = min(triton.next_power_of_2(numel_per_token), MAX_BLOCK_SIZE)
+    block_size = max(block_size, triton.next_power_of_2(topk))
+    num_warps = max(1, block_size // WARP_SIZE)
+    num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS)
+
+    _multimem_a2av_pull_combine_kernel[(num_blocks, 1, 1)](
+        output_tensor.data_ptr(),
+        symm_mem_hdl.buffer_ptrs_dev,
+        routing.data_ptr(),
+        symm_mem_hdl.signal_pad_ptrs_dev,
+        local_tokens=local_tokens,
+        rank_token_offset_ptr=rank_token_offset,
+        ep_max_tokens_ptr=ep_max_tokens,
+        input_byte_offset=input_byte_offset,
+        HIDDEN_SIZE=hidden_size,
+        BLOCK_SIZE=block_size,
+        NUMEL_PER_THREAD=numel_per_thread,
+        TOPK=topk,
+        EXPERTS_PER_RANK=experts_per_rank,
+        RANK=symm_mem_hdl.rank,
+        WORLD_SIZE=world_size,
+        num_warps=num_warps,
+    )
+    return output_tensor

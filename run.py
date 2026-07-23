@@ -39,9 +39,12 @@ from common import (  # noqa: E402
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--impl", choices=["deepep", "nvls", "nccl", "both", "all"], default="all",
-                   help="which dispatcher(s): deepep | nvls | nccl | both (deepep+nvls) | "
-                        "all (deepep+nvls+nccl)")
+    p.add_argument("--impl", default="all",
+                   help="which dispatcher(s): a single name, a COMMA-SEPARATED list, or a "
+                        "shortcut. Names: deepep | nvls | nccl | a2av (A2AV dispatch + A2AV pull "
+                        "combine) | a2av_rs (A2AV dispatch + reduce-scatter-v combine). Shortcuts: "
+                        "both (deepep+nvls) | all (deepep+nvls+nccl+a2av+a2av_rs). "
+                        "Examples: 'a2av', 'nvls,a2av,a2av_rs', 'nvls,deepep,a2av,a2av_rs'")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="148",
@@ -62,6 +65,30 @@ def parse_args():
     return p.parse_args()
 
 
+_KNOWN_IMPLS = ["deepep", "nvls", "nccl", "a2av", "a2av_rs"]
+
+
+def parse_impls(spec):
+    """Resolve --impl into an ordered list of impl names.
+
+    Accepts a shortcut ('all' -> all five; 'both' -> deepep+nvls) or a comma-separated
+    list of individual names (e.g. 'nvls,a2av,a2av_rs'). Order is preserved so all ranks
+    build/iterate the benchers in lockstep.
+    """
+    if spec == "all":
+        return list(_KNOWN_IMPLS)
+    if spec == "both":
+        return ["deepep", "nvls"]
+    names = [x.strip() for x in spec.split(",") if x.strip()]
+    bad = [n for n in names if n not in _KNOWN_IMPLS]
+    if bad:
+        raise SystemExit(f"unknown impl(s) {bad}; choose from {_KNOWN_IMPLS} "
+                         f"(comma-separated) or the shortcuts 'all'/'both'")
+    if not names:
+        raise SystemExit("no impls selected (--impl was empty)")
+    return names
+
+
 def timed(fn, group, args):
     """Time `fn`, falling back to eager if graph capture fails."""
     use_graph = args.timing == "graph"
@@ -79,12 +106,13 @@ def timed(fn, group, args):
 
 def main():
     args = parse_args()
+    impls = parse_impls(args.impl)
 
     # Import deep_ep BEFORE init_process_group. Importing it AFTER torch has
     # initialized its NCCL leaves DeepEP linked against a different NCCL than the
     # one backing the torch process group, and reading that comm handle in
     # _C.calculate_elastic_buffer_size segfaults during ElasticBuffer construction.
-    if args.impl in ("deepep", "both", "all"):
+    if "deepep" in impls:
         import deep_ep  # noqa: F401
 
     group, rank, world, local_rank = init_distributed()
@@ -110,17 +138,24 @@ def main():
         print(f"# impl={args.impl} num_layers={args.num_layers} device_sms={dev_sms} "
               f"deepep_num_sms_sweep={deepep_sms}", flush=True)
 
-    # Build benchers.
+    # Build benchers, in the order the user listed them (all ranks agree -> lockstep).
     benchers = []
-    if args.impl in ("deepep", "both", "all"):
-        from bench_deepep import DeepEPBencher
-        benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
-    if args.impl in ("nvls", "both", "all"):
-        from bench_nvls import NVLSBencher
-        benchers.append(NVLSBencher(cfg, group))
-    if args.impl in ("nccl", "all"):
-        from bench_nccl import NCCLBencher
-        benchers.append(NCCLBencher(cfg, group))
+    for name in impls:
+        if name == "deepep":
+            from bench_deepep import DeepEPBencher
+            benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
+        elif name == "nvls":
+            from bench_nvls import NVLSBencher
+            benchers.append(NVLSBencher(cfg, group))
+        elif name == "nccl":
+            from bench_nccl import NCCLBencher
+            benchers.append(NCCLBencher(cfg, group))
+        elif name == "a2av":
+            from bench_a2av import A2AVBencher
+            benchers.append(A2AVBencher(cfg, group))
+        elif name == "a2av_rs":
+            from bench_a2av import A2AVRSBencher
+            benchers.append(A2AVRSBencher(cfg, group))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
