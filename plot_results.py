@@ -26,25 +26,44 @@ import matplotlib.cm as cm  # noqa: E402
 IMPL_NAME = {"deepep": "DeepEP-v2 (A2A)", "nvls": "NVLS (AGv/RSv)",
              "nccl": "NCCL (AllGather)"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green"}
-_SUBTITLE = ("EP=4 on 4×B200 · 512 experts · top-k=22 · hidden=1024 · bf16 · "
-             "CUDA-graph timing")
+
+
+def _subtitle(ep):
+    """Subtitle line. EP size and node count are derived from the data (per_rank_counts
+    length in load()), so the plot reflects the actual run rather than a hardcoded config."""
+    if not ep:
+        return "512 experts · top-k=22 · hidden=1024 · bf16 · CUDA-graph timing"
+    nodes = max(1, ep // 4)  # 4 B200 GPUs per node
+    node_str = "1 node" if nodes == 1 else f"{nodes} nodes"
+    return (f"EP={ep} · {node_str} (4×B200/node) · 512 experts · top-k=22 · "
+            f"hidden=1024 · bf16 · CUDA-graph timing")
 
 
 def load(path):
     rows = []
+    ep = None  # world size = EP = #ranks, inferred from the per_rank_counts list length
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
             if r["phase"] != "decode_step":
                 continue
+            if ep is None:
+                parts = [c for c in r.get("per_rank_counts", "").strip().strip("[]").split(",")
+                         if c.strip() != ""]
+                if parts:
+                    ep = len(parts)
             rows.append(dict(impl=r["impl"], B=int(r["global_B"]),
                              num_sms=int(r.get("num_sms", -1)),
                              ms=float(r["latency_us"]) / 1000.0))  # us -> ms
-    return rows
+    return rows, ep
 
 
 def _ktick(v):
-    """Batch-size tick label: values over 999 in binary-k (1024->'1k', 2048->'2k', ...)."""
-    return f"{v // 1024}k" if v > 999 else str(v)
+    """Batch-size tick label in binary units: 1024->'1k', 131072->'128k', 1048576->'1M'."""
+    if v >= 1 << 20:
+        return f"{v >> 20}M"
+    if v > 999:
+        return f"{v >> 10}k"
+    return str(v)
 
 
 def plot_vs_B(rows, ax):
@@ -59,7 +78,7 @@ def plot_vs_B(rows, ax):
     ax.set_xscale("log", base=2)
     ax.set_xticks(allB)
     ax.set_xticklabels([_ktick(b) for b in allB])
-    ax.set_xlabel("global batch size B  (decode tokens across all 4 EP ranks)")
+    ax.set_xlabel("global batch size B  (decode tokens across all EP ranks)")
 
 
 def plot_vs_sms(rows, ax):
@@ -95,17 +114,18 @@ def main():
     p.add_argument("--title", default=None)
     args = p.parse_args()
 
-    rows = load(args.csv)
+    rows, ep = load(args.csv)
+    subtitle = _subtitle(ep)
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
     if args.x == "num_sms":
         plot_vs_sms(rows, ax)
         default_title = (f"MoE decode dispatch+combine vs DeepEP num_sms — "
-                         f"{args.num_layers} MoE layers/step\n{_SUBTITLE}")
+                         f"{args.num_layers} MoE layers/step\n{subtitle}")
     else:
         plot_vs_B(rows, ax)
         default_title = (f"MoE decode dispatch+combine latency — "
-                         f"{args.num_layers} MoE layers/step\n{_SUBTITLE}")
+                         f"{args.num_layers} MoE layers/step\n{subtitle}")
     ax.set_ylabel("latency per decode step (ms)")
     # Log y: latency spans ~1 ms (NVLS) to ~40 ms (NCCL), so a linear axis would squash the
     # fast impls. Log keeps all curves legible.

@@ -58,7 +58,11 @@ def init_distributed() -> "tuple[dist.ProcessGroup, int, int, int]":
     local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
     torch.cuda.set_device(local_rank)
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        # Pin the PG to this rank's local GPU. Without device_id, NCCL guesses the device
+        # from the GLOBAL rank -- wrong on multi-node (e.g. rank 4 -> "device 4" on a 4-GPU
+        # node) and it warns this "can cause a hang". The explicit device_id avoids that.
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size,
+                                device_id=torch.device("cuda", local_rank))
     group = dist.group.WORLD
     return group, rank, world_size, local_rank
 

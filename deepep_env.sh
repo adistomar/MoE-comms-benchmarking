@@ -34,14 +34,23 @@ if python3 -c 'import deep_ep' 2>/dev/null; then
     :  # already importable in this container
 elif ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
     echo "[deepep_env] using prebuilt _C extension at $DEEPEP_DIR (fast path; no recompile)"
-    python3 -m pip install -q --no-deps 'nvidia-nccl-cu13>=2.30.4' nvidia-nvshmem-cu13 >/dev/null || true
-    for pair in "$EP_NCCL_ROOT_DIR/lib:libnccl.so" "$EP_NVSHMEM_ROOT_DIR/lib:libnvshmem_host.so"; do
-        d="${pair%:*}"; n="${pair##*:}"
-        if [ ! -e "$d/$n" ]; then
-            cand=$(ls "$d/$n".* 2>/dev/null | sort | tail -1)
-            [ -n "$cand" ] && ln -sf "$(basename "$cand")" "$d/$n"
-        fi
-    done
+    # Guard the wheel install + symlink creation with a node-local file lock. With one task
+    # per GPU (multi-node launch) every local rank sources this concurrently and would
+    # otherwise race on the shared container site-packages -- a half-written nvshmem wheel
+    # gets mmap'd and SIGBUSes run.py. flock serializes: the first rank installs, the rest
+    # find the requirement already satisfied and the symlinks present, then fall through.
+    # Single-node (sourced once) takes the lock immediately, so this is a no-op there.
+    (
+        flock 9
+        python3 -m pip install -q --no-deps 'nvidia-nccl-cu13>=2.30.4' nvidia-nvshmem-cu13 >/dev/null 2>&1 || true
+        for pair in "$EP_NCCL_ROOT_DIR/lib:libnccl.so" "$EP_NVSHMEM_ROOT_DIR/lib:libnvshmem_host.so"; do
+            d="${pair%:*}"; n="${pair##*:}"
+            if [ ! -e "$d/$n" ]; then
+                cand=$(ls "$d/$n".* 2>/dev/null | sort | tail -1)
+                [ -n "$cand" ] && ln -sf "$(basename "$cand")" "$d/$n"
+            fi
+        done
+    ) 9>"${TMPDIR:-/tmp}/deepep_env_install.lock"
     export PYTHONPATH="$DEEPEP_DIR:${PYTHONPATH:-}"
 else
     echo "[deepep_env] no prebuilt extension found; building DeepEP from $DEEPEP_DIR"
