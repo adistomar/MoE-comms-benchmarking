@@ -50,7 +50,7 @@ MAX_NUM_BLOCKS = 148
 def _vmcast_size_kernel(
     in_routing_ptr, size_idx_ptr, n_tokens,
     K: tl.constexpr, EPR: tl.constexpr, RANK: tl.constexpr,
-    MIN_GROUP: tl.constexpr, NSZ: tl.constexpr, BLOCK: tl.constexpr,
+    MIN_GROUP: tl.constexpr, NSZ: tl.constexpr, BLOCK: tl.constexpr, KK: tl.constexpr,
 ):
     """Per-token group-size selection for the ONE-BUFFER design. Reduce the token's K experts to the
     dest-rank span [lo,hi] (source RANK forced in), then emit its group-size index size_idx = smallest
@@ -58,17 +58,21 @@ def _vmcast_size_kernel(
     That single index is the only routing-dependent per-token value; dispatch/combine gather the actual
     VAs from the per-size menus (mc_ptrs_*) by it. No VA gather / atomic / counts here."""
     pid = tl.program_id(0)
+    if pid * BLOCK >= n_tokens:          # whole block is past the valid tokens (mask all-0): skip an over-provisioned grid
+        return
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_tokens
     rp = in_routing_ptr.to(tl.int64).to(tl.pointer_type(tl.int64))
     si_out = size_idx_ptr.to(tl.int64).to(tl.pointer_type(tl.int32))
-    lo = tl.full((BLOCK,), RANK, tl.int64)
-    hi = tl.full((BLOCK,), RANK, tl.int64)
-    for k in range(K):
-        e = tl.load(rp + offs * K + k, mask=mask, other=RANK * EPR)
-        d = e // EPR
-        lo = tl.minimum(lo, d)
-        hi = tl.maximum(hi, d)
+    # Vectorized: load the whole [BLOCK, K] routing tile in ONE coalesced 2D load (KK = K padded up to a
+    # power of 2 for tl.arange; pad columns read RANK*EPR -> dest rank RANK, harmless to the span), then
+    # reduce experts -> dest ranks and take the min/max dest-rank over the token's K experts.
+    kk = tl.arange(0, KK)
+    col = kk < K
+    e = tl.load(rp + offs[:, None] * K + kk[None, :], mask=mask[:, None] & col[None, :], other=RANK * EPR)
+    d = e // EPR                                       # [BLOCK, K] dest ranks
+    lo = tl.minimum(tl.min(d, axis=1), RANK)           # smallest dest rank (source RANK folded in)
+    hi = tl.maximum(tl.max(d, axis=1), RANK)           # largest  dest rank (source RANK folded in)
     diff = lo ^ hi
     size_idx = tl.full((BLOCK,), NSZ - 1, tl.int32)
     for i in range(NSZ - 1, -1, -1):
@@ -86,6 +90,7 @@ def vmcast_compute_size(in_routing, size_idx, epr, rank, min_group, nsz):
     _vmcast_size_kernel[grid](
         in_routing.data_ptr(), size_idx.data_ptr(),
         n, K=K, EPR=epr, RANK=rank, MIN_GROUP=min_group, NSZ=nsz, BLOCK=BLOCK,
+        KK=triton.next_power_of_2(K),
     )
 
 

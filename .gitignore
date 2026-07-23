@@ -12,3 +12,7 @@ __pycache__/
 # SLURM logs
 *.out
 slurm-*.out
+
+# Local job launchers (kept on disk for running jobs, but not tracked/pushed)
+test_hier.sbatch
+test_multinode.sbatch
