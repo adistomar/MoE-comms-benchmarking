@@ -42,9 +42,10 @@ def parse_args():
     p.add_argument("--impl", default="all",
                    help="which dispatcher(s): a single name, a COMMA-SEPARATED list, or a "
                         "shortcut. Names: deepep | nvls | nccl | a2av (A2AV dispatch + A2AV pull "
-                        "combine) | a2av_rs (A2AV dispatch + reduce-scatter-v combine). Shortcuts: "
-                        "both (deepep+nvls) | all (deepep+nvls+nccl+a2av+a2av_rs). "
-                        "Examples: 'a2av', 'nvls,a2av,a2av_rs', 'nvls,deepep,a2av,a2av_rs'")
+                        "combine) | a2av_rs (A2AV dispatch + reduce-scatter-v combine) | "
+                        "a2av_push (A2AV dispatch + push combine). Shortcuts: "
+                        "both (deepep+nvls) | all (all impls including a2av_push). "
+                        "Examples: 'a2av', 'nvls,a2av,a2av_rs,a2av_push'")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="148",
@@ -65,7 +66,7 @@ def parse_args():
     return p.parse_args()
 
 
-_KNOWN_IMPLS = ["deepep", "nvls", "nccl", "a2av", "a2av_rs"]
+_KNOWN_IMPLS = ["deepep", "nvls", "nccl", "a2av", "a2av_rs", "a2av_push"]
 
 
 def parse_impls(spec):
@@ -156,6 +157,9 @@ def main():
         elif name == "a2av_rs":
             from bench_a2av import A2AVRSBencher
             benchers.append(A2AVRSBencher(cfg, group))
+        elif name == "a2av_push":
+            from bench_a2av import A2AVPushBencher
+            benchers.append(A2AVPushBencher(cfg, group))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if

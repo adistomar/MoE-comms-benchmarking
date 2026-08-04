@@ -33,7 +33,16 @@ except ImportError:
     _SymmetricMemory = MagicMock()
 
 from .barrier import symm_mem_sync
-from .multimem_asm import ld_64, ld_128, ld_128_p2p, st_64, st_128, st_128_p2p
+from .multimem_asm import (
+    ld_64,
+    ld_128,
+    ld_128_nc,
+    ld_128_p2p,
+    st_32_p2p,
+    st_64,
+    st_128,
+    st_128_p2p,
+)
 from .utils import is_device_nvls_capable, sync_threads
 
 
@@ -1248,6 +1257,536 @@ def _multimem_a2av_pull_combine_kernel(
             out_w = _pack_bf16x2(acc_w_hi, acc_w_lo)
             local_ptrs = output_ptr.to(tl.pointer_type(tl.uint64)) + local_offsets * 2
             st_128(local_ptrs, out_x, out_y, out_z, out_w, mask=mask, multicast_op=False)
+
+
+# ── Push combine (Idea 2: compact token lists built during dispatch) ──────────
+#
+# The first push design made every destination rank re-derive validity from the
+# all-gathered routing: for each of the `valid_tokens` global slots it loaded TOPK
+# expert ids and ran two block reductions (an OR-reduce for the destination bitmask
+# and a range search for the owning source rank) *between* consecutive p2p stores.
+# Two things came out of that, and both are fixed here.
+#
+# 1. Idea 2 -- move the routing work off the data path.  A cheap builder kernel runs
+#    once per dispatch and publishes, into every destination rank d, a COMPACT list
+#    of the local token indices that rank R is sending to d:
+#
+#      recv_list [R, j * SEG + i] = local token index (relative to R) of the i-th
+#                                   token of R's segment j that routes to d
+#      recv_count[R, j]           = how many entries segment j has (0 .. SEG)
+#
+#    A "segment" is a fixed SEG-token slice of R's local tokens, so the compaction
+#    is purely intra-segment: no atomics, no global prefix sum, no zero-fill between
+#    steps, and the slot a token occupies is a pure function of (R, j).  The push
+#    kernel reads one scalar count per SEG tokens and then streams listed tokens
+#    with zero per-token metadata work.  The builder also writes a per-token
+#    destination BITMASK (`dest_mask`, one int64 per local token) that the receive
+#    kernel consumes in place of its own TOPK reduction.
+#
+# 2. Feed NVLink enough outstanding traffic.  The old kernel ran 148 CTAs x 128
+#    threads and had each thread issue one 128-bit load, wait, then one store --
+#    about 2 KB in flight per CTA.  DeepEP's intranode kernels run one ~1024-thread
+#    CTA per SM and keep 4-5 independent 16-byte loads per thread, issuing every
+#    load before any store (`UNROLLED_WARP_COPY`), for ~60 KB in flight per CTA.
+#    Below, a CTA's work tile is A2AV_UNROLL * 1024 lanes wide while the launch uses
+#    1024 threads, so Triton hands each thread A2AV_UNROLL independent chunks and
+#    emits them as a load batch followed by a store batch -- the same shape, ~64 KB
+#    of loads in flight per CTA.  The lane space is split as
+#    (TPT tokens) x (NPT_P2 channels) with a power-of-two channel stride, which keeps
+#    each warp inside one token row so the 128-bit accesses stay fully coalesced.
+#
+# Layout of combine_recv:  [WORLD_SIZE, per_rank_max_tokens, H]  bf16, symmetric.
+#   Slot [d, local_t, :] = expert GEMM output from dest rank d for source token local_t.
+#
+# Visibility: the builder's p2p writes need no barrier of their own -- it runs
+# immediately before the dispatch kernel on the same stream, and dispatch's
+# end-of-kernel release/acquire barrier publishes them along with the dispatched
+# activations.
+
+
+# 128-bit chunks a single thread keeps in flight, and the launch width. DeepEP's
+# NVLink copy path runs UNROLLED_WARP_COPY with an unroll of 8 on a 1024-thread CTA
+# (128 B/thread, ~64 KB/CTA); its reducing path uses 4, because the accumulators
+# compete for the same registers. Same split here.
+A2AV_UNROLL_COPY = 8
+A2AV_UNROLL_REDUCE = 4
+# 512 threads, not 1024: unroll 8 needs ~100 registers/thread for the in-flight chunks
+# and their address vectors, and a 1024-thread block caps out at 65536/1024 = 64
+# registers/thread, which would spill. 512 x 8 chunks still puts the same ~64 KB of
+# loads in flight per CTA (DeepEP's figure) with 128 registers/thread of headroom.
+A2AV_THREADS = 512
+# Tokens per compaction segment (power of two). Also the builder's per-CTA work unit,
+# so keeping it small keeps the builder parallel at modest batch sizes; the push
+# kernel subdivides a segment into TILES_PER_SEG tiles, so SEG does not bound its
+# parallelism. Only the per-segment count load (one scalar per SEG tokens) scales with it.
+A2AV_SEGMENT_TOKENS = 256
+
+
+def _tile_shape(numel_per_token: int, unroll: int = A2AV_UNROLL_COPY):
+    """Lane/thread geometry for the tiled A2AV data-movement kernels.
+
+    Returns (npt_p2, tokens_per_tile, block_size, num_warps) where `block_size` is the
+    Triton tile width in 128-bit chunks and the launch uses A2AV_THREADS threads, so
+    each thread receives block_size / A2AV_THREADS independent chunks -- issued as one
+    load batch followed by one store batch, which is what puts bytes in flight.
+    """
+    npt_p2 = triton.next_power_of_2(numel_per_token)
+    tokens_per_tile = max(1, (A2AV_THREADS * unroll) // npt_p2)
+    block_size = npt_p2 * tokens_per_tile
+    num_warps = min(32, max(1, min(A2AV_THREADS, block_size) // 32))
+    return npt_p2, tokens_per_tile, block_size, num_warps
+
+
+def a2av_index_buffer_shapes(per_rank_max_tokens: int, world_size: int):
+    """Shapes of the two symmetric index buffers the push combine needs.
+
+    recv_list  : [world_size, nseg_max * SEG] int32 -- compact local token indices,
+                 written by each source rank into every destination rank.
+    recv_count : [world_size, nseg_max]       int32 -- entries per (source rank, segment).
+    """
+    seg = A2AV_SEGMENT_TOKENS
+    nseg_max = max(1, (per_rank_max_tokens + seg - 1) // seg)
+    return (world_size, nseg_max * seg), (world_size, nseg_max)
+
+
+@triton.jit
+def _a2av_build_index_kernel(
+    routing_ptr,        # int64: LOCAL [local_tokens, TOPK] int64 expert ids
+    dest_mask_ptr,      # int64: LOCAL [local_tokens] int64 destination bitmask (out)
+    list_ptrs,          # int64: buffer_ptrs_dev of the recv_list symmetric buffer
+    count_ptrs,         # int64: buffer_ptrs_dev of the recv_count symmetric buffer
+    local_tokens,       # int: this rank's token count this step
+    list_stride,        # int: int32 elements per source-rank row of recv_list
+    count_stride,       # int: int32 elements per source-rank row of recv_count
+    SEG: tl.constexpr,
+    TOPK: tl.constexpr,
+    EXPERTS_PER_RANK: tl.constexpr,
+    RANK: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+):
+    """Build the per-destination compact token lists and the local destination bitmask.
+
+    One CTA handles whole SEG-token segments in a grid-stride loop.  The destination
+    bitmask is folded one top-k column at a time (a [SEG] vector per column) rather
+    than materialising the [SEG, TOPK] block, which keeps the register footprint at a
+    few values per thread; the TOPK columns of a token are contiguous, so the column
+    loads hit in cache.  For each destination rank the hitting tokens are compacted
+    with an intra-segment `tl.cumsum` and the resulting index run (plus its length) is
+    p2p-stored into that rank's recv_list / recv_count.
+
+    Because the compaction is intra-segment the write offsets are deterministic --
+    segment j always owns list slots [j*SEG, (j+1)*SEG) -- so no atomics are needed
+    and stale entries from a previous step are never read (the reader bounds its
+    inner loop by recv_count, which is rewritten every step).
+    """
+    pid = tl.program_id(0)
+
+    routing_ptr = routing_ptr.to(tl.int64)
+    dest_mask_ptr = dest_mask_ptr.to(tl.int64)
+    list_ptrs = list_ptrs.to(tl.int64)
+    count_ptrs = count_ptrs.to(tl.int64)
+
+    rptr = routing_ptr.to(tl.pointer_type(tl.int64))
+    mptr = dest_mask_ptr.to(tl.pointer_type(tl.int64))
+    lptrs = list_ptrs.to(tl.pointer_type(tl.int64))
+    cptrs = count_ptrs.to(tl.pointer_type(tl.int64))
+
+    ti = tl.arange(0, SEG)
+
+    for j in range(pid, tl.cdiv(local_tokens, SEG), tl.num_programs(0)):
+        t = j * SEG + ti
+        in_rng = t < local_tokens
+        row = t.to(tl.int64) * TOPK
+
+        dest_mask = tl.zeros([SEG], tl.uint64)
+        for k in tl.static_range(TOPK):
+            expert = tl.load(rptr + row + k, mask=in_rng, other=-1)
+            dest = tl.where(expert >= 0, expert // EXPERTS_PER_RANK, 0).to(tl.uint64)
+            dest_mask = dest_mask | tl.where(
+                expert >= 0,
+                tl.full([SEG], 1, tl.uint64) << dest,
+                tl.zeros([SEG], tl.uint64),
+            )
+        tl.store(mptr + t, dest_mask.to(tl.int64), mask=in_rng)
+
+        for d in tl.static_range(WORLD_SIZE):
+            hit = in_rng & (((dest_mask >> d) & 1) == 1)
+            flag = tl.where(hit, 1, 0)
+            pos = tl.cumsum(flag, 0) - flag  # exclusive prefix sum within the segment
+            count = tl.sum(flag, 0)
+
+            list_base = (
+                tl.load(lptrs + d).to(tl.pointer_type(tl.int32)) + RANK * list_stride + j * SEG
+            )
+            st_32_p2p(list_base + pos, t.to(tl.uint32), mask=hit)
+
+            # One lane publishes the segment's length.
+            count_base = (
+                tl.load(cptrs + d).to(tl.pointer_type(tl.int32)) + RANK * count_stride + j
+            )
+            st_32_p2p(
+                count_base + tl.zeros([SEG], tl.int32),
+                (count + tl.zeros([SEG], tl.int32)).to(tl.uint32),
+                mask=ti == 0,
+            )
+
+
+@triton.jit
+def _multimem_a2av_push_combine_kernel(
+    out_buf_ptr,           # int64: LOCAL [global_cap, H] bf16 expert output
+    combine_recv_ptrs,     # int64: buffer_ptrs_dev of the combine_recv symmetric buffer
+    signal_pad_ptrs,       # signal_pad_ptrs_dev of the combine_recv symmetric buffer
+    recv_list_ptr,         # int64: LOCAL recv_list  [WORLD_SIZE, list_stride]  int32
+    recv_count_ptr,        # int64: LOCAL recv_count [WORLD_SIZE, count_stride] int32
+    tokens_per_rank_ptr,   # int64: LOCAL [WORLD_SIZE] int32 per-rank token counts
+    per_rank_max_tokens,   # int: token stride of combine_recv
+    list_stride,           # int: int32 elements per source-rank row of recv_list
+    count_stride,          # int: int32 elements per source-rank row of recv_count
+    SEG: tl.constexpr,
+    TILES_PER_SEG: tl.constexpr,  # ceil(SEG / TPT): tile slots a segment is split into
+    NPT: tl.constexpr,     # 128-bit chunks per token row
+    NPT_P2: tl.constexpr,  # NPT rounded up to a power of two (lane stride per token)
+    TPT: tl.constexpr,     # token rows a CTA moves per iteration
+    BLOCK_SIZE: tl.constexpr,  # == NPT_P2 * TPT
+    RANK: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+):
+    """Push this rank's expert outputs into each source rank's combine_recv buffer.
+
+    Walks the compact lists published by the builder, so every active lane maps to a
+    real token -- no hole scanning and no routing reduction on the data path.  The
+    tile is A2AV_UNROLL chunks per thread wide, so each iteration issues its whole
+    load batch before its store batch and keeps ~64 KB in flight per CTA.
+
+    Ends with a release barrier so every pushed row is visible before any rank runs
+    the receive kernel.
+    """
+    pid = tl.program_id(0)
+    num_pid = tl.num_programs(0)
+
+    out_buf_ptr = out_buf_ptr.to(tl.int64)
+    combine_recv_ptrs = combine_recv_ptrs.to(tl.int64)
+    recv_list_ptr = recv_list_ptr.to(tl.int64)
+    recv_count_ptr = recv_count_ptr.to(tl.int64)
+    tokens_per_rank_ptr = tokens_per_rank_ptr.to(tl.int64)
+
+    obuf = out_buf_ptr.to(tl.pointer_type(tl.uint64))
+    lst = recv_list_ptr.to(tl.pointer_type(tl.int32))
+    cnt = recv_count_ptr.to(tl.pointer_type(tl.int32))
+    tok = tokens_per_rank_ptr.to(tl.pointer_type(tl.int32))
+    rptrs = combine_recv_ptrs.to(tl.pointer_type(tl.int64))
+
+    tid = tl.arange(0, BLOCK_SIZE)
+    ch = tid % NPT_P2
+    slot = tid // NPT_P2
+    ch_ok = ch < NPT
+
+    for step in tl.static_range(WORLD_SIZE):
+        # Rotate the peer walk by RANK so all ranks do not target the same peer at the
+        # same instant (DeepEP rotates its warp->peer map the same way).
+        src = (step + RANK) % WORLD_SIZE
+        # Source rank `src`'s token count and its base offset in the dense global layout.
+        n_src = tl.load(tok + src)
+        rank_off = 0
+        for q in tl.static_range(WORLD_SIZE):
+            if q < src:
+                rank_off += tl.load(tok + q)
+        recv_base = tl.load(rptrs + src).to(tl.pointer_type(tl.uint64))
+
+        # Grid-stride over (segment, tile) pairs, NOT whole segments. Striding over
+        # segments alone leaves the grid idle whenever a rank holds fewer than
+        # num_pid * SEG tokens -- at one segment per rank a single CTA would move that
+        # rank's entire payload while the other 147 wait on the barrier. Tiles beyond a
+        # segment's `count` mask off, so the fixed TILES_PER_SEG stride costs nothing.
+        for unit in range(pid, tl.cdiv(n_src, SEG) * TILES_PER_SEG, num_pid):
+            j = unit // TILES_PER_SEG
+            count = tl.load(cnt + src * count_stride + j)
+            i = (unit % TILES_PER_SEG) * TPT + slot
+            ok = (i < count) & ch_ok
+            local_t = tl.load(lst + src * list_stride + j * SEG + i, mask=ok, other=0)
+            # Source side of the copy: the dense global slot this token occupies.
+            src_off = (rank_off + local_t).to(tl.int64) * NPT + ch
+            (x, y, z, w) = ld_128_nc(obuf + src_off * 2, mask=ok)
+            # Destination: slot [RANK, local_t, :] of the source rank's buffer.
+            dst_off = (RANK * per_rank_max_tokens + local_t).to(tl.int64) * NPT + ch
+            st_128_p2p(recv_base + dst_off * 2, x, y, z, w, mask=ok)
+
+    sync_threads()
+    symm_mem_sync(
+        signal_pad_ptrs, None, RANK, WORLD_SIZE,
+        hasPreviousMemAccess=True, hasSubsequentMemAccess=True,
+    )
+
+
+@triton.jit
+def _multimem_a2av_recv_combine_kernel(
+    output_ptr,           # int64: LOCAL [local_tokens, H] bf16 output
+    combine_recv_ptr,     # int64: LOCAL combine_recv [WORLD_SIZE, per_rank_max_tokens, H] bf16
+    dest_mask_ptr,        # int64: LOCAL [local_tokens] int64 destination bitmask
+    local_tokens,         # int: this rank's token count this step
+    per_rank_max_tokens,  # int: token stride of combine_recv
+    NPT: tl.constexpr,
+    NPT_P2: tl.constexpr,
+    TPT: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    RANK: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
+):
+    """Sum the pushed contributions out of the LOCAL combine_recv buffer.
+
+    Purely local traffic: the push kernel's release barrier already made every remote
+    write visible, so this pass just reads the WORLD_SIZE candidate slots for each of
+    this rank's tokens, accumulates the ones its destination bitmask marks, and writes
+    the bf16 result.  Same tiling as the push kernel, and the destination bitmask comes
+    from the builder, so there is no TOPK reduction here either.
+    """
+    pid = tl.program_id(0)
+
+    output_ptr = output_ptr.to(tl.int64)
+    combine_recv_ptr = combine_recv_ptr.to(tl.int64)
+    dest_mask_ptr = dest_mask_ptr.to(tl.int64)
+
+    obuf = output_ptr.to(tl.pointer_type(tl.uint64))
+    rbuf = combine_recv_ptr.to(tl.pointer_type(tl.uint64))
+    mptr = dest_mask_ptr.to(tl.pointer_type(tl.int64))
+
+    tid = tl.arange(0, BLOCK_SIZE)
+    ch = tid % NPT_P2
+    slot = tid // NPT_P2
+    ch_ok = ch < NPT
+
+    for tile in range(pid, tl.cdiv(local_tokens, TPT), tl.num_programs(0)):
+        t = tile * TPT + slot
+        ok = (t < local_tokens) & ch_ok
+        dest_mask = tl.load(mptr + t, mask=ok, other=0).to(tl.uint64)
+
+        acc_x_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_x_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_y_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_y_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_z_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_z_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_w_hi = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_w_lo = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+
+        for d in tl.static_range(WORLD_SIZE):
+            rd = ok & (((dest_mask >> d) & 1) == 1)
+            off = (d * per_rank_max_tokens + t).to(tl.int64) * NPT + ch
+            (x, y, z, w) = ld_128(rbuf + off * 2, mask=rd, multicast_op=False)
+            x_hi, x_lo = _unpack_bf16x2(x, rd)
+            y_hi, y_lo = _unpack_bf16x2(y, rd)
+            z_hi, z_lo = _unpack_bf16x2(z, rd)
+            w_hi, w_lo = _unpack_bf16x2(w, rd)
+            acc_x_hi += x_hi; acc_x_lo += x_lo
+            acc_y_hi += y_hi; acc_y_lo += y_lo
+            acc_z_hi += z_hi; acc_z_lo += z_lo
+            acc_w_hi += w_hi; acc_w_lo += w_lo
+
+        out_off = t.to(tl.int64) * NPT + ch
+        st_128(
+            obuf + out_off * 2,
+            _pack_bf16x2(acc_x_hi, acc_x_lo),
+            _pack_bf16x2(acc_y_hi, acc_y_lo),
+            _pack_bf16x2(acc_z_hi, acc_z_lo),
+            _pack_bf16x2(acc_w_hi, acc_w_lo),
+            mask=ok,
+            multicast_op=False,
+        )
+
+
+def multimem_a2av_build_index(
+    routing: torch.Tensor,
+    dest_mask: torch.Tensor,
+    recv_list: torch.Tensor,
+    recv_count: torch.Tensor,
+    recv_list_hdl: _SymmetricMemory,
+    recv_count_hdl: _SymmetricMemory,
+    num_experts: int,
+    world_size: int,
+    **kwargs,
+) -> None:
+    """Publish the compact per-destination token lists and the local destination bitmask.
+
+    Runs immediately before the dispatch kernel on the same stream; dispatch's
+    end-of-kernel release barrier is what makes the p2p writes visible to peers, so
+    this kernel issues no barrier of its own.
+
+    Args:
+        routing: this rank's [local_tokens, TOPK] int64 expert ids.
+        dest_mask: LOCAL [>= local_tokens] int64 output, one destination bitmask per token.
+        recv_list / recv_count: LOCAL views of the symmetric index buffers; only their
+            shapes are read here (the kernel writes into the PEERS' copies).
+        recv_list_hdl / recv_count_hdl: symmetric handles for those buffers.
+        num_experts: total expert count, used to derive experts_per_rank.
+        world_size: number of EP ranks.
+    """
+    assert HAVE_TRITON, "Triton is required for multimem_a2av_build_index."
+    assert routing.ndim == 2, "routing must be 2-D [local_tokens, TOPK]."
+    assert routing.dtype == torch.int64, f"routing must be int64, got {routing.dtype}."
+    assert dest_mask.dtype == torch.int64, f"dest_mask must be int64, got {dest_mask.dtype}."
+    assert recv_list.dtype == torch.int32 and recv_count.dtype == torch.int32, (
+        "recv_list / recv_count must be int32."
+    )
+    assert num_experts % world_size == 0, "num_experts must be divisible by world_size."
+    assert world_size <= 64, "destination ranks are encoded in a uint64 bitmask."
+    assert hasattr(recv_list_hdl, "buffer_ptrs_dev"), (
+        "recv_list_hdl has no buffer_ptrs_dev; this torch build does not expose per-rank "
+        "symmetric pointers."
+    )
+
+    local_tokens, topk = routing.shape
+    if local_tokens == 0:
+        return
+    assert dest_mask.numel() >= local_tokens, "dest_mask is too small for local_tokens."
+
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    seg = A2AV_SEGMENT_TOKENS
+    num_blocks = min(max(1, (local_tokens + seg - 1) // seg), MAX_NUM_BLOCKS)
+
+    _a2av_build_index_kernel[(num_blocks, 1, 1)](
+        routing.data_ptr(),
+        dest_mask.data_ptr(),
+        recv_list_hdl.buffer_ptrs_dev,
+        recv_count_hdl.buffer_ptrs_dev,
+        local_tokens,
+        recv_list.shape[1],
+        recv_count.shape[1],
+        SEG=seg,
+        TOPK=topk,
+        EXPERTS_PER_RANK=num_experts // world_size,
+        RANK=recv_list_hdl.rank,
+        WORLD_SIZE=world_size,
+        num_warps=8,
+    )
+
+
+def multimem_a2av_push_combine(
+    out_buf: torch.Tensor,
+    combine_recv_hdl: _SymmetricMemory,
+    recv_list: torch.Tensor,
+    recv_count: torch.Tensor,
+    tokens_per_rank: torch.Tensor,
+    per_rank_max_tokens: int,
+    **kwargs,
+) -> None:
+    """Push expert GEMM outputs into every source rank's combine_recv buffer.
+
+    Consumes the compact lists written by `multimem_a2av_build_index`, so the kernel
+    touches only real tokens and performs no routing work on the data path.  Ends with
+    a release barrier; run `multimem_a2av_recv_combine` afterwards to reduce.
+
+    Args:
+        out_buf: this rank's expert output, [global_cap, H] bf16 (dense global layout).
+        combine_recv_hdl: symmetric handle for the [world*cap, H] bf16 receive buffer.
+        recv_list / recv_count: this rank's LOCAL views of the index buffers that the
+            peers' builders wrote into.
+        tokens_per_rank: [world_size] int32 per-rank token counts (metadata buffer).
+        per_rank_max_tokens: static per-rank capacity (combine_recv token stride).
+    """
+    assert HAVE_TRITON, "Triton is required for multimem_a2av_push_combine."
+    assert out_buf.ndim == 2, "out_buf must be 2-D [global_cap, H]."
+    assert out_buf.dtype == torch.bfloat16, f"out_buf must be bf16, got {out_buf.dtype}."
+    assert is_device_nvls_capable(out_buf.device), (
+        "multimem_a2av_push_combine requires Hopper+ GPU with NVLink (SM >= 9)."
+    )
+    assert hasattr(combine_recv_hdl, "buffer_ptrs_dev"), (
+        "combine_recv_hdl has no buffer_ptrs_dev; this torch build does not expose "
+        "per-rank symmetric pointers."
+    )
+
+    world_size = combine_recv_hdl.world_size
+    hidden_size = out_buf.shape[1]
+    row_bytes = hidden_size * out_buf.element_size()
+    assert row_bytes % 16 == 0, (
+        f"Hidden row ({hidden_size} x {out_buf.element_size()}B = {row_bytes}B) must be "
+        f"16-byte aligned for the 128-bit push path."
+    )
+
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    numel_per_thread = 128 // (out_buf.element_size() * 8)
+    npt = (hidden_size + numel_per_thread - 1) // numel_per_thread
+    npt_p2, tpt, block_size, num_warps = _tile_shape(npt)
+
+    _multimem_a2av_push_combine_kernel[(MAX_NUM_BLOCKS, 1, 1)](
+        out_buf.data_ptr(),
+        combine_recv_hdl.buffer_ptrs_dev,
+        combine_recv_hdl.signal_pad_ptrs_dev,
+        recv_list.data_ptr(),
+        recv_count.data_ptr(),
+        tokens_per_rank.data_ptr(),
+        per_rank_max_tokens,
+        recv_list.shape[1],
+        recv_count.shape[1],
+        SEG=A2AV_SEGMENT_TOKENS,
+        TILES_PER_SEG=max(1, A2AV_SEGMENT_TOKENS // tpt),
+        NPT=npt,
+        NPT_P2=npt_p2,
+        TPT=tpt,
+        BLOCK_SIZE=block_size,
+        RANK=combine_recv_hdl.rank,
+        WORLD_SIZE=world_size,
+        num_warps=num_warps,
+    )
+
+
+def multimem_a2av_recv_combine(
+    output_tensor: torch.Tensor,
+    combine_recv: torch.Tensor,
+    dest_mask: torch.Tensor,
+    per_rank_max_tokens: int,
+    rank: int,
+    world_size: int,
+    **kwargs,
+) -> torch.Tensor:
+    """Reduce the pushed contributions from the LOCAL combine_recv into `output_tensor`.
+
+    No barrier: the push kernel's end-of-kernel release barrier already ordered every
+    remote write ahead of this kernel.  Reads only local memory.
+
+    Args:
+        output_tensor: LOCAL [local_tokens, H] bf16 output.
+        combine_recv: LOCAL [world_size * per_rank_max_tokens, H] bf16 receive buffer.
+        dest_mask: LOCAL [>= local_tokens] int64 destination bitmask from the builder.
+        per_rank_max_tokens: combine_recv token stride.
+    """
+    assert HAVE_TRITON, "Triton is required for multimem_a2av_recv_combine."
+    assert output_tensor.ndim == 2 and combine_recv.ndim == 2, "tensors must be 2-D."
+    assert output_tensor.dtype == torch.bfloat16, (
+        f"output_tensor must be bf16, got {output_tensor.dtype}."
+    )
+    assert combine_recv.dtype == torch.bfloat16, (
+        f"combine_recv must be bf16, got {combine_recv.dtype}."
+    )
+    assert is_device_nvls_capable(output_tensor.device), (
+        "multimem_a2av_recv_combine requires Hopper+ GPU with NVLink (SM >= 9)."
+    )
+
+    local_tokens, hidden_size = output_tensor.shape
+    if local_tokens == 0:
+        return output_tensor
+    assert combine_recv.shape[1] == hidden_size, "hidden mismatch."
+
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    numel_per_thread = 128 // (output_tensor.element_size() * 8)
+    npt = (hidden_size + numel_per_thread - 1) // numel_per_thread
+    npt_p2, tpt, block_size, num_warps = _tile_shape(npt, A2AV_UNROLL_REDUCE)
+    num_blocks = min(max(1, (local_tokens + tpt - 1) // tpt), MAX_NUM_BLOCKS)
+
+    _multimem_a2av_recv_combine_kernel[(num_blocks, 1, 1)](
+        output_tensor.data_ptr(),
+        combine_recv.data_ptr(),
+        dest_mask.data_ptr(),
+        local_tokens,
+        per_rank_max_tokens,
+        NPT=npt,
+        NPT_P2=npt_p2,
+        TPT=tpt,
+        BLOCK_SIZE=block_size,
+        RANK=rank,
+        WORLD_SIZE=world_size,
+        num_warps=num_warps,
+    )
+    return output_tensor
 
 
 def multimem_a2av_combine(

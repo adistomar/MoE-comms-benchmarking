@@ -38,8 +38,12 @@ import torch
 from nvls.symmetric_memory import SymmetricMemoryManager
 from nvls.metadata import fused_metadata_update
 from nvls.torch_symm_triton.variable_collectives import (
+    a2av_index_buffer_shapes,
+    multimem_a2av_build_index,
     multimem_a2av_combine,
     multimem_a2av_dispatch_3tensor,
+    multimem_a2av_push_combine,
+    multimem_a2av_recv_combine,
     multimem_reduce_scatter_v,
 )
 
@@ -288,3 +292,109 @@ class A2AVRSBencher(_A2AVBencher):
 
     name = "a2av_rs"
     combine_mode = "rsv"
+
+
+class A2AVPushBencher(_A2AVBencher):
+    """A2AV dispatch + push combine (Idea 2): each dest rank d unicast-pushes its expert
+    outputs into a dedicated slot [d, local_t, :] of the source rank's combine_recv
+    symmetric buffer; the source rank then accumulates locally (no NVLink reads in the
+    combine at all).
+
+    Which tokens a dest rank owes back is NOT rediscovered from the routing at combine
+    time.  A builder kernel runs just before each dispatch and publishes, into every
+    peer, a compact per-segment list of the token indices this rank is sending it
+    (`recv_list` / `recv_count`) plus a local per-token destination bitmask
+    (`dest_mask`).  The push kernel therefore walks only real tokens and does zero
+    routing work on the data path; the builder's p2p writes ride the dispatch kernel's
+    end-of-kernel release barrier, so they cost no extra synchronisation.
+
+    Extra buffers over the shared A2AV set (allocated once):
+      combine_recv : [WORLD_SIZE * per_rank_cap, H] bf16, symmetric
+      recv_list    : [WORLD_SIZE, nseg_max * SEG]   int32, symmetric
+      recv_count   : [WORLD_SIZE, nseg_max]         int32, symmetric
+      dest_mask    : [per_rank_cap]                 int64, local
+
+    The combine runs as two back-to-back kernels on the same stream:
+      1. push kernel: streams out_buf -> remote combine_recv, ends with a release barrier.
+      2. recv kernel: reads local combine_recv, fp32-accumulates, writes bf16 output.
+    """
+
+    name = "a2av_push"
+    combine_mode = "push"
+
+    def build(self):
+        super().build()
+        cfg = self.cfg
+        # combine_recv: [WORLD_SIZE * per_rank_cap, H] bf16, viewed in the kernel as
+        # [WORLD_SIZE, per_rank_cap, H].  Each dest rank d writes to rows
+        # [d * per_rank_cap : (d+1) * per_rank_cap].
+        self.combine_recv = self._buf(
+            "a2av_push_recv",
+            [cfg.ep_size * cfg.per_rank_cap, cfg.hidden],
+            torch.bfloat16,
+        )
+        # Compact send-index buffers. Peers write into these; this rank reads its own.
+        list_shape, count_shape = a2av_index_buffer_shapes(cfg.per_rank_cap, cfg.ep_size)
+        self.recv_list = self._buf("a2av_push_list", list(list_shape), torch.int32)
+        self.recv_count = self._buf("a2av_push_count", list(count_shape), torch.int32)
+        # Per-token destination bitmask for this rank's own tokens (local, not symmetric).
+        self.dest_mask = torch.zeros(cfg.per_rank_cap, dtype=torch.int64, device=self.device)
+        if not hasattr(self.combine_recv["handle"], "buffer_ptrs_dev"):
+            raise RuntimeError(
+                "A2AVPush requires torch _SymmetricMemory.buffer_ptrs_dev; "
+                "this torch build does not expose it."
+            )
+
+    def _buf(self, key, shape, dtype):
+        b = SymmetricMemoryManager.get_buffer(
+            key, process_group=self.group, size_mb=size_mb(shape, dtype)
+        ).maybe_get_tensor(shape, dtype=dtype)
+        if b["handle"] is None:
+            raise RuntimeError(
+                f"A2AVPush symmetric-memory init failed for '{key}'."
+            )
+        return b
+
+    def dispatch(self):
+        """Publish the compact send index, then run the shared A2AV dispatch.
+
+        Order matters: the builder's p2p writes into the peers' recv_list/recv_count are
+        made visible by the dispatch kernel's end-of-kernel release barrier, so the
+        builder must precede dispatch on this stream.
+        """
+        cfg = self.cfg
+        multimem_a2av_build_index(
+            routing=self.in_routing,
+            dest_mask=self.dest_mask,
+            recv_list=self.recv_list["tensor"],
+            recv_count=self.recv_count["tensor"],
+            recv_list_hdl=self.recv_list["handle"],
+            recv_count_hdl=self.recv_count["handle"],
+            num_experts=cfg.num_experts,
+            world_size=cfg.ep_size,
+            max_num_blocks=self.num_sms,
+        )
+        super().dispatch()
+
+    def combine(self):
+        cfg = self.cfg
+        # Phase 1: stream out_buf into the source ranks' combine_recv buffers.
+        multimem_a2av_push_combine(
+            out_buf=self.out_buf["tensor"],
+            combine_recv_hdl=self.combine_recv["handle"],
+            recv_list=self.recv_list["tensor"],
+            recv_count=self.recv_count["tensor"],
+            tokens_per_rank=self.meta["tensor"],
+            per_rank_max_tokens=cfg.per_rank_cap,
+            max_num_blocks=self.num_sms,
+        )
+        # Phase 2: read local combine_recv, accumulate in fp32, write bf16 output.
+        multimem_a2av_recv_combine(
+            output_tensor=self.out,
+            combine_recv=self.combine_recv["tensor"],
+            dest_mask=self.dest_mask,
+            per_rank_max_tokens=cfg.per_rank_cap,
+            rank=cfg.rank,
+            world_size=cfg.ep_size,
+            max_num_blocks=self.num_sms,
+        )

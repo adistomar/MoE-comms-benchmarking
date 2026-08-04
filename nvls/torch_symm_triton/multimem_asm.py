@@ -447,6 +447,65 @@ def st_128_p2p(ptr, x, y, z, w, mask):
 
 
 @triton.jit
+def ld_128_nc(ptr, mask):
+    """Streaming 128-bit local load through the read-only path.
+
+    `ld.global.nc.L1::no_allocate.L2::256B` (SASS `LDG.E.NA.128.CONSTANT`): the data is
+    read once and forwarded straight to NVLink, so allocating it in L1 only evicts
+    lines the kernel still needs, and the 256-byte L2 sector hint prefetches the rest
+    of the token row. Same lever DeepEP applies to every bulk load on its copy path.
+
+    `.nc` requires the region to be read-only for the lifetime of the kernel -- true of
+    the expert-output buffer during the push combine, which no rank writes while the
+    push is in flight (peers write combine_recv, a different buffer).
+    """
+    return tl.inline_asm_elementwise(
+        """
+        {
+            .reg .pred %p0;
+            setp.ne.s32 %p0, $5, 1;
+            @%p0 bra end;
+            ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {$0, $1, $2, $3}, [$4];
+            end:
+        }
+        """,
+        "=r,=r,=r,=r,l,r",
+        args=[ptr, mask.to(tl.int32)],
+        dtype=(tl.uint32, tl.uint32, tl.uint32, tl.uint32),
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def st_32_p2p(ptr, x, mask):
+    """Unicast 32-bit store to a single peer's symmetric buffer (system scope).
+
+    32-bit sibling of `st_128_p2p` (`st.relaxed.sys.global.u32`). Used by the A2AV
+    send-index builder to publish the compact per-segment token lists and counts into
+    each destination rank's buffers. Relaxed is sufficient: the dispatch kernel's
+    end-of-kernel `release.sys` barrier (which runs after this kernel on the same
+    stream) orders these stores before any peer observes the arrival signal.
+    """
+    return tl.inline_asm_elementwise(
+        """
+        {
+            .reg .pred %p0;
+            setp.ne.s32 %p0, $3, 1;
+            @%p0 bra end;
+            st.relaxed.sys.global.u32 [$1], $2;
+            end:
+        }
+        """,
+        "=r,l,r,r",
+        args=[ptr, x, mask.to(tl.int32)],
+        dtype=(tl.uint32),
+        is_pure=False,
+        pack=1,
+    )
+
+
+@triton.jit
 def ld_128_p2p(ptr, mask):
     """Unicast 128-bit load from a single peer's symmetric buffer (system scope).
 
