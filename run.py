@@ -43,9 +43,11 @@ def parse_args():
                    help="which dispatcher(s): a single name, a COMMA-SEPARATED list, or a "
                         "shortcut. Names: deepep | nvls | nccl | a2av (A2AV dispatch + A2AV pull "
                         "combine) | a2av_rs (A2AV dispatch + reduce-scatter-v combine) | "
-                        "a2av_push (A2AV dispatch + push combine). Shortcuts: "
-                        "both (deepep+nvls) | all (all impls including a2av_push). "
-                        "Examples: 'a2av', 'nvls,a2av,a2av_rs,a2av_push'")
+                        "a2av_push (A2AV dispatch + push combine) | dynamic (picks "
+                        "AGv/RSv or A2Av per step, on the device). Shortcuts: "
+                        "both (deepep+nvls) | all (all impls) | "
+                        "compare (nvls+a2av_push+dynamic, the 3-way regime comparison). "
+                        "Examples: 'dynamic', 'nvls,a2av_push,dynamic'")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="148",
@@ -58,6 +60,25 @@ def parse_args():
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--timing", choices=["graph", "eager"], default="graph")
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--dyn-dispatch-threshold", type=int, default=None,
+                   help="GLOBAL token count at which `dynamic` switches HIDDEN from AGv "
+                        "multicast to A2Av unicast (default: the measured crossover baked "
+                        "into variable_collectives). Set 0 to pin A2Av, a huge value to "
+                        "pin AGv -- useful for isolating one branch.")
+    p.add_argument("--dyn-combine-threshold", type=int, default=None,
+                   help="GLOBAL token count at which `dynamic` switches the combine from "
+                        "RSv to push+local-reduce (and starts publishing the send index)")
+    p.add_argument("--out-dtype", "--dyn-out-dtype", dest="out_dtype",
+                   choices=["bf16", "fp32"], default="bf16",
+                   help="expert-output (combine-source) buffer dtype, applied to EVERY "
+                        "impl that supports it (nvls and dynamic) so the comparison stays "
+                        "apples-to-apples. bf16 (default) is this bench's own convention; "
+                        "fp32 is what Megatron's fused-MoE unpermute actually produces and "
+                        "is what the in-tree threshold defaults were measured with. Under "
+                        "fp32 the in-switch reduce moves twice the bytes AND the NVLS path "
+                        "pays a separate fp32->bf16 cast, so all-to-all-v takes over much "
+                        "earlier. (a2av_push is bf16-only by construction: its wire format "
+                        "is bf16 either way.)")
     p.add_argument("--out", default=None, help="CSV output path (rank 0)")
     p.add_argument("--validate", action="store_true",
                    help="run known-value correctness checks for each impl and exit "
@@ -66,25 +87,28 @@ def parse_args():
     return p.parse_args()
 
 
-_KNOWN_IMPLS = ["deepep", "nvls", "nccl", "a2av", "a2av_rs", "a2av_push"]
+_KNOWN_IMPLS = ["deepep", "nvls", "nccl", "a2av", "a2av_rs", "a2av_push", "dynamic"]
 
 
 def parse_impls(spec):
     """Resolve --impl into an ordered list of impl names.
 
-    Accepts a shortcut ('all' -> all five; 'both' -> deepep+nvls) or a comma-separated
-    list of individual names (e.g. 'nvls,a2av,a2av_rs'). Order is preserved so all ranks
-    build/iterate the benchers in lockstep.
+    Accepts a shortcut ('all' -> every impl; 'both' -> deepep+nvls; 'compare' ->
+    nvls+a2av_push+dynamic, the AGv/RSv vs A2Av vs regime-adaptive comparison) or a
+    comma-separated list of individual names (e.g. 'nvls,a2av_push,dynamic'). Order is
+    preserved so all ranks build/iterate the benchers in lockstep.
     """
     if spec == "all":
         return list(_KNOWN_IMPLS)
     if spec == "both":
         return ["deepep", "nvls"]
+    if spec == "compare":
+        return ["nvls", "a2av_push", "dynamic"]
     names = [x.strip() for x in spec.split(",") if x.strip()]
     bad = [n for n in names if n not in _KNOWN_IMPLS]
     if bad:
         raise SystemExit(f"unknown impl(s) {bad}; choose from {_KNOWN_IMPLS} "
-                         f"(comma-separated) or the shortcuts 'all'/'both'")
+                         f"(comma-separated) or the shortcuts 'all'/'both'/'compare'")
     if not names:
         raise SystemExit("no impls selected (--impl was empty)")
     return names
@@ -139,6 +163,8 @@ def main():
         print(f"# impl={args.impl} num_layers={args.num_layers} device_sms={dev_sms} "
               f"deepep_num_sms_sweep={deepep_sms}", flush=True)
 
+    _out_dtype = torch.float32 if args.out_dtype == "fp32" else torch.bfloat16
+
     # Build benchers, in the order the user listed them (all ranks agree -> lockstep).
     benchers = []
     for name in impls:
@@ -147,7 +173,7 @@ def main():
             benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
         elif name == "nvls":
             from bench_nvls import NVLSBencher
-            benchers.append(NVLSBencher(cfg, group))
+            benchers.append(NVLSBencher(cfg, group, out_dtype=_out_dtype))
         elif name == "nccl":
             from bench_nccl import NCCLBencher
             benchers.append(NCCLBencher(cfg, group))
@@ -160,6 +186,15 @@ def main():
         elif name == "a2av_push":
             from bench_a2av import A2AVPushBencher
             benchers.append(A2AVPushBencher(cfg, group))
+        elif name == "dynamic":
+            from bench_dynamic import DynamicBencher
+            # None => the kernel wrappers resolve the threshold measured for this EP.
+            benchers.append(DynamicBencher(
+                cfg, group,
+                dispatch_threshold=args.dyn_dispatch_threshold,
+                combine_threshold=args.dyn_combine_threshold,
+                out_dtype=_out_dtype,
+            ))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if

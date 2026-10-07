@@ -12,3 +12,5 @@ __pycache__/
 # SLURM logs
 *.out
 slurm-*.out
+
+*.png

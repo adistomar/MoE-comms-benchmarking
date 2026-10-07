@@ -4,6 +4,8 @@ from .collectives import multimem_all_gather, multimem_all_gather_fused, multime
 from .fused_collectives import fused_multimem_rs_add_norm_ag
 from .utils import are_tensors_nvls_eligible, is_device_nvls_capable
 from .variable_collectives import (
+    A2AV_COMBINE_THRESHOLD_DEFAULT,
+    A2AV_DISPATCH_THRESHOLD_DEFAULT,
     a2av_index_buffer_shapes,
     multimem_a2av_build_index,
     multimem_a2av_combine,
@@ -12,5 +14,8 @@ from .variable_collectives import (
     multimem_a2av_recv_combine,
     multimem_all_gather_v,
     multimem_all_gatherv_3tensor,
+    multimem_dynamic_combine_push,
+    multimem_dynamic_combine_reduce,
+    multimem_dynamic_dispatch_3tensor,
     multimem_reduce_scatter_v,
 )

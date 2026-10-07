@@ -1,0 +1,118 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0903 07:46:36.644000 2533092 torch/distributed/run.py:851] 
+W0903 07:46:36.644000 2533092 torch/distributed/run.py:851] *****************************************
+W0903 07:46:36.644000 2533092 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0903 07:46:36.644000 2533092 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.29.7+cuda13.2
+# per-phase breakdown  EP=4 experts=512 topk=22 hidden=1024 out_dtype=fp32 layers=88 reps=40
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 127, in <module>
+[rank1]:     main()
+[rank1]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 96, in main
+[rank1]:     (_, d_us), _ = time_region(_dispatch_only, group, args.warmup, args.reps, True)
+[rank1]:     ^^^^^^^^^
+[rank1]: TypeError: cannot unpack non-iterable float object
+[rank2]: Traceback (most recent call last):
+[rank2]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 127, in <module>
+[rank2]:     main()
+[rank2]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 96, in main
+[rank2]:     (_, d_us), _ = time_region(_dispatch_only, group, args.warmup, args.reps, True)
+[rank2]:     ^^^^^^^^^
+[rank2]: TypeError: cannot unpack non-iterable float object
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 127, in <module>
+[rank0]:     main()
+[rank0]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 96, in main
+[rank0]:     (_, d_us), _ = time_region(_dispatch_only, group, args.warmup, args.reps, True)
+[rank0]:     ^^^^^^^^^
+[rank0]: TypeError: cannot unpack non-iterable float object
+[rank3]: Traceback (most recent call last):
+[rank3]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 127, in <module>
+[rank3]:     main()
+[rank3]:   File "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/bench_phase_breakdown.py", line 96, in main
+[rank3]:     (_, d_us), _ = time_region(_dispatch_only, group, args.warmup, args.reps, True)
+[rank3]:     ^^^^^^^^^
+[rank3]: TypeError: cannot unpack non-iterable float object
+W0903 07:46:45.235000 2533092 torch/distributed/elastic/multiprocessing/api.py:1010] Sending process 2534172 closing signal SIGTERM
+W0903 07:46:45.235000 2533092 torch/distributed/elastic/multiprocessing/api.py:1010] Sending process 2534174 closing signal SIGTERM
+W0903 07:46:45.235000 2533092 torch/distributed/elastic/multiprocessing/api.py:1010] Sending process 2534175 closing signal SIGTERM
+E0903 07:46:45.649000 2533092 torch/distributed/elastic/multiprocessing/api.py:984] failed (exitcode: 1) local_rank: 1 (pid: 2534173) of binary: /usr/bin/python3
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/run.py", line 990, in main
+    run(args)
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/run.py", line 981, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/launcher/api.py", line 170, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/launcher/api.py", line 317, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+bench_phase_breakdown.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-09-03_07:46:45
+  host      : nvl72129-T07.cm.cluster
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 2534172)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2026-09-03_07:46:45
+  host      : nvl72129-T07.cm.cluster
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 2534174)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[3]:
+  time      : 2026-09-03_07:46:45
+  host      : nvl72129-T07.cm.cluster
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 2534175)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-03_07:46:45
+  host      : nvl72129-T07.cm.cluster
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 2534173)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+srun: error: nvl72129-T07: task 0: Exited with exit code 1
+srun: Terminating StepId=6875964.14

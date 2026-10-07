@@ -1,0 +1,208 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0903 07:10:38.266000 2497696 torch/distributed/run.py:851] 
+W0903 07:10:38.266000 2497696 torch/distributed/run.py:851] *****************************************
+W0903 07:10:38.266000 2497696 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0903 07:10:38.266000 2497696 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.29.7+cuda13.2
+# MoE dispatch/combine decode benchmark
+# EP=4 experts=512 topk=22 hidden=1024 per_rank_cap=8192 timing=graph reps=30
+# impl=dynamic num_layers=88 device_sms=152 deepep_num_sms_sweep=[148]
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+  dynamic B=   1 sms=148 counts=[1, 0, 0, 0] decode_step(88L)=  1149.99us (per-layer= 13.07us)  [graph]
+  dynamic B=   2 sms=148 counts=[1, 1, 0, 0] decode_step(88L)=  1207.09us (per-layer= 13.72us)  [graph]
+  dynamic B=   4 sms=148 counts=[1, 1, 1, 1] decode_step(88L)=  1211.20us (per-layer= 13.76us)  [graph]
+  dynamic B=   8 sms=148 counts=[2, 2, 2, 2] decode_step(88L)=  1247.00us (per-layer= 14.17us)  [graph]
+  dynamic B=  16 sms=148 counts=[4, 4, 4, 4] decode_step(88L)=  1221.07us (per-layer= 13.88us)  [graph]
+  dynamic B=  32 sms=148 counts=[8, 8, 8, 8] decode_step(88L)=  1251.38us (per-layer= 14.22us)  [graph]
+  dynamic B=  64 sms=148 counts=[16, 16, 16, 16] decode_step(88L)=  1305.32us (per-layer= 14.83us)  [graph]
+  dynamic B= 128 sms=148 counts=[32, 32, 32, 32] decode_step(88L)=  1429.57us (per-layer= 16.25us)  [graph]
+  dynamic B= 256 sms=148 counts=[64, 64, 64, 64] decode_step(88L)=  1471.35us (per-layer= 16.72us)  [graph]
+  dynamic B= 512 sms=148 counts=[128, 128, 128, 128] decode_step(88L)=  1774.27us (per-layer= 20.16us)  [graph]
+  dynamic B=1024 sms=148 counts=[256, 256, 256, 256] decode_step(88L)=  2407.03us (per-layer= 27.35us)  [graph]
+  dynamic B=2048 sms=148 counts=[512, 512, 512, 512] decode_step(88L)=  3751.83us (per-layer= 42.63us)  [graph]
+  dynamic B=4096 sms=148 counts=[1024, 1024, 1024, 1024] decode_step(88L)=  6524.45us (per-layer= 74.14us)  [graph]
+  dynamic B=8192 sms=148 counts=[2048, 2048, 2048, 2048] decode_step(88L)= 12044.39us (per-layer=136.87us)  [graph]
+  dynamic B=16384 sms=148 counts=[4096, 4096, 4096, 4096] decode_step(88L)= 22759.29us (per-layer=258.63us)  [graph]
+  dynamic B=32768 sms=148 counts=[8192, 8192, 8192, 8192] decode_step(88L)= 44746.76us (per-layer=508.49us)  [graph]
+
+# impl,global_B,num_sms,phase,latency_us,timing
+dynamic,1,148,decode_step,1149.989,graph
+dynamic,2,148,decode_step,1207.094,graph
+dynamic,4,148,decode_step,1211.196,graph
+dynamic,8,148,decode_step,1247.004,graph
+dynamic,16,148,decode_step,1221.066,graph
+dynamic,32,148,decode_step,1251.378,graph
+dynamic,64,148,decode_step,1305.324,graph
+dynamic,128,148,decode_step,1429.572,graph
+dynamic,256,148,decode_step,1471.354,graph
+dynamic,512,148,decode_step,1774.273,graph
+dynamic,1024,148,decode_step,2407.030,graph
+dynamic,2048,148,decode_step,3751.835,graph
+dynamic,4096,148,decode_step,6524.453,graph
+dynamic,8192,148,decode_step,12044.394,graph
+dynamic,16384,148,decode_step,22759.294,graph
+dynamic,32768,148,decode_step,44746.757,graph
+# wrote mg_agv_rsv.csv
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0903 07:10:58.005000 2498218 torch/distributed/run.py:851] 
+W0903 07:10:58.005000 2498218 torch/distributed/run.py:851] *****************************************
+W0903 07:10:58.005000 2498218 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0903 07:10:58.005000 2498218 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.29.7+cuda13.2
+# MoE dispatch/combine decode benchmark
+# EP=4 experts=512 topk=22 hidden=1024 per_rank_cap=8192 timing=graph reps=30
+# impl=dynamic num_layers=88 device_sms=152 deepep_num_sms_sweep=[148]
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+  dynamic B=   1 sms=148 counts=[1, 0, 0, 0] decode_step(88L)=  1188.46us (per-layer= 13.51us)  [graph]
+  dynamic B=   2 sms=148 counts=[1, 1, 0, 0] decode_step(88L)=  1243.81us (per-layer= 14.13us)  [graph]
+  dynamic B=   4 sms=148 counts=[1, 1, 1, 1] decode_step(88L)=  1244.39us (per-layer= 14.14us)  [graph]
+  dynamic B=   8 sms=148 counts=[2, 2, 2, 2] decode_step(88L)=  1286.03us (per-layer= 14.61us)  [graph]
+  dynamic B=  16 sms=148 counts=[4, 4, 4, 4] decode_step(88L)=  1260.30us (per-layer= 14.32us)  [graph]
+  dynamic B=  32 sms=148 counts=[8, 8, 8, 8] decode_step(88L)=  1290.11us (per-layer= 14.66us)  [graph]
+  dynamic B=  64 sms=148 counts=[16, 16, 16, 16] decode_step(88L)=  1345.95us (per-layer= 15.29us)  [graph]
+  dynamic B= 128 sms=148 counts=[32, 32, 32, 32] decode_step(88L)=  1467.06us (per-layer= 16.67us)  [graph]
+  dynamic B= 256 sms=148 counts=[64, 64, 64, 64] decode_step(88L)=  1534.99us (per-layer= 17.44us)  [graph]
+  dynamic B= 512 sms=148 counts=[128, 128, 128, 128] decode_step(88L)=  1850.86us (per-layer= 21.03us)  [graph]
+  dynamic B=1024 sms=148 counts=[256, 256, 256, 256] decode_step(88L)=  2435.15us (per-layer= 27.67us)  [graph]
+  dynamic B=2048 sms=148 counts=[512, 512, 512, 512] decode_step(88L)=  3727.08us (per-layer= 42.35us)  [graph]
+  dynamic B=4096 sms=148 counts=[1024, 1024, 1024, 1024] decode_step(88L)=  6372.15us (per-layer= 72.41us)  [graph]
+  dynamic B=8192 sms=148 counts=[2048, 2048, 2048, 2048] decode_step(88L)= 11518.66us (per-layer=130.89us)  [graph]
+  dynamic B=16384 sms=148 counts=[4096, 4096, 4096, 4096] decode_step(88L)= 21870.64us (per-layer=248.53us)  [graph]
+  dynamic B=32768 sms=148 counts=[8192, 8192, 8192, 8192] decode_step(88L)= 43082.61us (per-layer=489.58us)  [graph]
+
+# impl,global_B,num_sms,phase,latency_us,timing
+dynamic,1,148,decode_step,1188.455,graph
+dynamic,2,148,decode_step,1243.811,graph
+dynamic,4,148,decode_step,1244.395,graph
+dynamic,8,148,decode_step,1286.034,graph
+dynamic,16,148,decode_step,1260.295,graph
+dynamic,32,148,decode_step,1290.109,graph
+dynamic,64,148,decode_step,1345.953,graph
+dynamic,128,148,decode_step,1467.065,graph
+dynamic,256,148,decode_step,1534.986,graph
+dynamic,512,148,decode_step,1850.864,graph
+dynamic,1024,148,decode_step,2435.153,graph
+dynamic,2048,148,decode_step,3727.076,graph
+dynamic,4096,148,decode_step,6372.148,graph
+dynamic,8192,148,decode_step,11518.657,graph
+dynamic,16384,148,decode_step,21870.644,graph
+dynamic,32768,148,decode_step,43082.613,graph
+# wrote mg_a2av_rsv.csv
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0903 07:11:13.170000 2498593 torch/distributed/run.py:851] 
+W0903 07:11:13.170000 2498593 torch/distributed/run.py:851] *****************************************
+W0903 07:11:13.170000 2498593 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0903 07:11:13.170000 2498593 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.29.7+cuda13.2
+# MoE dispatch/combine decode benchmark
+# EP=4 experts=512 topk=22 hidden=1024 per_rank_cap=8192 timing=graph reps=30
+# impl=dynamic num_layers=88 device_sms=152 deepep_num_sms_sweep=[148]
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+  dynamic B=   1 sms=148 counts=[1, 0, 0, 0] decode_step(88L)=  1594.84us (per-layer= 18.12us)  [graph]
+  dynamic B=   2 sms=148 counts=[1, 1, 0, 0] decode_step(88L)=  1762.66us (per-layer= 20.03us)  [graph]
+  dynamic B=   4 sms=148 counts=[1, 1, 1, 1] decode_step(88L)=  1887.79us (per-layer= 21.45us)  [graph]
+  dynamic B=   8 sms=148 counts=[2, 2, 2, 2] decode_step(88L)=  1979.78us (per-layer= 22.50us)  [graph]
+  dynamic B=  16 sms=148 counts=[4, 4, 4, 4] decode_step(88L)=  2032.16us (per-layer= 23.09us)  [graph]
+  dynamic B=  32 sms=148 counts=[8, 8, 8, 8] decode_step(88L)=  2085.71us (per-layer= 23.70us)  [graph]
+  dynamic B=  64 sms=148 counts=[16, 16, 16, 16] decode_step(88L)=  2254.82us (per-layer= 25.62us)  [graph]
+  dynamic B= 128 sms=148 counts=[32, 32, 32, 32] decode_step(88L)=  2281.39us (per-layer= 25.92us)  [graph]
+  dynamic B= 256 sms=148 counts=[64, 64, 64, 64] decode_step(88L)=  2294.14us (per-layer= 26.07us)  [graph]
+  dynamic B= 512 sms=148 counts=[128, 128, 128, 128] decode_step(88L)=  2352.28us (per-layer= 26.73us)  [graph]
+  dynamic B=1024 sms=148 counts=[256, 256, 256, 256] decode_step(88L)=  2688.12us (per-layer= 30.55us)  [graph]
+  dynamic B=2048 sms=148 counts=[512, 512, 512, 512] decode_step(88L)=  2890.64us (per-layer= 32.85us)  [graph]
+  dynamic B=4096 sms=148 counts=[1024, 1024, 1024, 1024] decode_step(88L)=  3648.87us (per-layer= 41.46us)  [graph]
+  dynamic B=8192 sms=148 counts=[2048, 2048, 2048, 2048] decode_step(88L)=  5427.71us (per-layer= 61.68us)  [graph]
+  dynamic B=16384 sms=148 counts=[4096, 4096, 4096, 4096] decode_step(88L)=  9366.67us (per-layer=106.44us)  [graph]
+  dynamic B=32768 sms=148 counts=[8192, 8192, 8192, 8192] decode_step(88L)= 17520.38us (per-layer=199.10us)  [graph]
+
+# impl,global_B,num_sms,phase,latency_us,timing
+dynamic,1,148,decode_step,1594.845,graph
+dynamic,2,148,decode_step,1762.658,graph
+dynamic,4,148,decode_step,1887.792,graph
+dynamic,8,148,decode_step,1979.785,graph
+dynamic,16,148,decode_step,2032.160,graph
+dynamic,32,148,decode_step,2085.712,graph
+dynamic,64,148,decode_step,2254.816,graph
+dynamic,128,148,decode_step,2281.392,graph
+dynamic,256,148,decode_step,2294.139,graph
+dynamic,512,148,decode_step,2352.276,graph
+dynamic,1024,148,decode_step,2688.124,graph
+dynamic,2048,148,decode_step,2890.639,graph
+dynamic,4096,148,decode_step,3648.875,graph
+dynamic,8192,148,decode_step,5427.711,graph
+dynamic,16384,148,decode_step,9366.670,graph
+dynamic,32768,148,decode_step,17520.380,graph
+# wrote mg_a2av_push.csv
+ALL_DONE

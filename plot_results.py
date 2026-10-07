@@ -25,9 +25,12 @@ import matplotlib.cm as cm  # noqa: E402
 
 IMPL_NAME = {"deepep": "DeepEP-v2 (A2A)", "nvls": "NVLS (AGv/RSv)",
              "nccl": "NCCL (AllGather)",
-             "a2av": "A2AV (dispatch + pull)", "a2av_rs": "A2AV dispatch + RSv"}
+             "a2av": "A2AV (dispatch + pull)", "a2av_rs": "A2AV dispatch + RSv",
+             "a2av_push": "A2AV (dispatch + push)",
+             "dynamic": "Dynamic (AGv/RSv <-> A2Av)"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2av": "tab:red", "a2av_rs": "tab:purple"}
+              "a2av": "tab:red", "a2av_rs": "tab:purple",
+              "a2av_push": "tab:brown", "dynamic": "black"}
 
 
 def _subtitle(ep):

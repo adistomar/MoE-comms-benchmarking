@@ -135,8 +135,12 @@ class _A2AVBencher:
             step_metadata=self.step_metadata,
         )
 
-    def dispatch(self):
-        """A2AV-V: unicast hidden to each token's destination ranks; AGV routing + probs."""
+    def dispatch(self, **index_kwargs):
+        """A2AV-V: unicast hidden to each token's destination ranks; AGV routing + probs.
+
+        `index_kwargs` optionally carries the push combine's index buffers, in which case
+        the send-index builder runs inline in the dispatch kernel.
+        """
         multimem_a2av_dispatch_3tensor(
             self.agv_h["tensor"], self.agv_r["tensor"], self.agv_p["tensor"],
             self.in_hidden, self.in_routing, self.in_probs,
@@ -146,6 +150,7 @@ class _A2AVBencher:
             per_rank_max_tokens=self.cfg.per_rank_cap,
             num_experts=self.cfg.num_experts,
             max_num_blocks=self.num_sms,
+            **index_kwargs,
         )
 
     def combine(self):
@@ -362,19 +367,17 @@ class A2AVPushBencher(_A2AVBencher):
         made visible by the dispatch kernel's end-of-kernel release barrier, so the
         builder must precede dispatch on this stream.
         """
-        cfg = self.cfg
-        multimem_a2av_build_index(
-            routing=self.in_routing,
+        # The builder runs INLINE inside the dispatch kernel (pass the index buffers),
+        # rather than as its own launch: as a separate kernel its grid is
+        # cdiv(local_tokens, SEG), so at a few hundred tokens per rank a handful of CTAs
+        # do all the WORLD_SIZE segment-cumsums while the rest of the GPU waits.
+        super().dispatch(
             dest_mask=self.dest_mask,
             recv_list=self.recv_list["tensor"],
             recv_count=self.recv_count["tensor"],
             recv_list_hdl=self.recv_list["handle"],
             recv_count_hdl=self.recv_count["handle"],
-            num_experts=cfg.num_experts,
-            world_size=cfg.ep_size,
-            max_num_blocks=self.num_sms,
         )
-        super().dispatch()
 
     def combine(self):
         cfg = self.cfg

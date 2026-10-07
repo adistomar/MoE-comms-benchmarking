@@ -1,0 +1,91 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W0903 07:56:58.617000 2540984 torch/distributed/run.py:851] 
+W0903 07:56:58.617000 2540984 torch/distributed/run.py:851] *****************************************
+W0903 07:56:58.617000 2540984 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0903 07:56:58.617000 2540984 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.29.7+cuda13.2
+# per-phase breakdown  EP=4 experts=512 topk=22 hidden=1024 out_dtype=fp32 layers=88 reps=40
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+  B=1024    nvls           dispatch=   10.17us  combine=   11.21us  total=   21.38us
+  B=1024    dynamic[AGv]   dispatch=    9.19us  combine=   12.53us  total=   21.72us
+  B=1024    dynamic[A2Av]  dispatch=   12.89us  combine=   16.22us  total=   29.11us
+  B=2048    nvls           dispatch=   13.65us  combine=   18.21us  total=   31.86us
+  B=2048    dynamic[AGv]   dispatch=   12.45us  combine=   19.13us  total=   31.59us
+  B=2048    dynamic[A2Av]  dispatch=   14.69us  combine=   17.37us  total=   32.06us
+  B=3072    nvls           dispatch=   17.34us  combine=   25.40us  total=   42.74us
+  B=3072    dynamic[AGv]   dispatch=   16.01us  combine=   27.12us  total=   43.13us
+  B=3072    dynamic[A2Av]  dispatch=   16.46us  combine=   19.13us  total=   35.59us
+  B=4096    nvls           dispatch=   21.12us  combine=   31.16us  total=   52.29us
+  B=4096    dynamic[AGv]   dispatch=   19.52us  combine=   31.92us  total=   51.44us
+  B=4096    dynamic[A2Av]  dispatch=   18.71us  combine=   22.24us  total=   40.94us
+  B=5120    nvls           dispatch=   24.59us  combine=   38.06us  total=   62.66us
+  B=5120    dynamic[AGv]   dispatch=   23.06us  combine=   38.63us  total=   61.70us
+  B=5120    dynamic[A2Av]  dispatch=   21.22us  combine=   25.37us  total=   46.59us
+  B=6144    nvls           dispatch=   28.95us  combine=   45.05us  total=   74.00us
+  B=6144    dynamic[AGv]   dispatch=   27.14us  combine=   45.35us  total=   72.48us
+  B=6144    dynamic[A2Av]  dispatch=   23.99us  combine=   26.85us  total=   50.84us
+  B=8192    nvls           dispatch=   37.10us  combine=   57.71us  total=   94.81us
+  B=8192    dynamic[AGv]   dispatch=   35.16us  combine=   58.90us  total=   94.07us
+  B=8192    dynamic[A2Av]  dispatch=   29.97us  combine=   32.61us  total=   62.58us
+  B=12288   nvls           dispatch=   51.72us  combine=   83.32us  total=  135.04us
+  B=12288   dynamic[AGv]   dispatch=   49.26us  combine=   83.64us  total=  132.90us
+  B=12288   dynamic[A2Av]  dispatch=   41.70us  combine=   43.90us  total=   85.61us
+  B=16384   nvls           dispatch=   65.28us  combine=  109.53us  total=  174.81us
+  B=16384   dynamic[AGv]   dispatch=   62.25us  combine=  109.05us  total=  171.30us
+  B=16384   dynamic[A2Av]  dispatch=   52.28us  combine=   53.80us  total=  106.08us
+
+| global B | tokens/rank | impl | dispatch us | combine us | total us | dispatch vs nvls | combine vs nvls |
+|---|---|---|---|---|---|---|---|
+| 1024 | 256 | nvls | 10.17 | 11.21 | 21.38 | 1.000x | 1.000x |
+| 1024 | 256 | dynamic[AGv] | 9.19 | 12.53 | 21.72 | 1.107x | 0.895x |
+| 1024 | 256 | dynamic[A2Av] | 12.89 | 16.22 | 29.11 | 0.789x | 0.691x |
+| 2048 | 512 | nvls | 13.65 | 18.21 | 31.86 | 1.000x | 1.000x |
+| 2048 | 512 | dynamic[AGv] | 12.45 | 19.13 | 31.59 | 1.096x | 0.952x |
+| 2048 | 512 | dynamic[A2Av] | 14.69 | 17.37 | 32.06 | 0.929x | 1.048x |
+| 3072 | 768 | nvls | 17.34 | 25.40 | 42.74 | 1.000x | 1.000x |
+| 3072 | 768 | dynamic[AGv] | 16.01 | 27.12 | 43.13 | 1.083x | 0.937x |
+| 3072 | 768 | dynamic[A2Av] | 16.46 | 19.13 | 35.59 | 1.054x | 1.328x |
+| 4096 | 1024 | nvls | 21.12 | 31.16 | 52.29 | 1.000x | 1.000x |
+| 4096 | 1024 | dynamic[AGv] | 19.52 | 31.92 | 51.44 | 1.082x | 0.976x |
+| 4096 | 1024 | dynamic[A2Av] | 18.71 | 22.24 | 40.94 | 1.129x | 1.401x |
+| 5120 | 1280 | nvls | 24.59 | 38.06 | 62.66 | 1.000x | 1.000x |
+| 5120 | 1280 | dynamic[AGv] | 23.06 | 38.63 | 61.70 | 1.066x | 0.985x |
+| 5120 | 1280 | dynamic[A2Av] | 21.22 | 25.37 | 46.59 | 1.159x | 1.500x |
+| 6144 | 1536 | nvls | 28.95 | 45.05 | 74.00 | 1.000x | 1.000x |
+| 6144 | 1536 | dynamic[AGv] | 27.14 | 45.35 | 72.48 | 1.067x | 0.993x |
+| 6144 | 1536 | dynamic[A2Av] | 23.99 | 26.85 | 50.84 | 1.207x | 1.678x |
+| 8192 | 2048 | nvls | 37.10 | 57.71 | 94.81 | 1.000x | 1.000x |
+| 8192 | 2048 | dynamic[AGv] | 35.16 | 58.90 | 94.07 | 1.055x | 0.980x |
+| 8192 | 2048 | dynamic[A2Av] | 29.97 | 32.61 | 62.58 | 1.238x | 1.770x |
+| 12288 | 3072 | nvls | 51.72 | 83.32 | 135.04 | 1.000x | 1.000x |
+| 12288 | 3072 | dynamic[AGv] | 49.26 | 83.64 | 132.90 | 1.050x | 0.996x |
+| 12288 | 3072 | dynamic[A2Av] | 41.70 | 43.90 | 85.61 | 1.240x | 1.898x |
+| 16384 | 4096 | nvls | 65.28 | 109.53 | 174.81 | 1.000x | 1.000x |
+| 16384 | 4096 | dynamic[AGv] | 62.25 | 109.05 | 171.30 | 1.049x | 1.004x |
+| 16384 | 4096 | dynamic[A2Av] | 52.28 | 53.80 | 106.08 | 1.249x | 2.036x |
+
+# wrote phase_fine.csv

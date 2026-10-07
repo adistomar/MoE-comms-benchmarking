@@ -1,0 +1,499 @@
+Experiment directory: inference-bench/reasoning/experiments/20260903_084556_prof_nvls
+  jobid=6877039 node=nvl72153-T18 port=29840 procs=4
+  dispatcher=nvls model=superv3
+  batch_sizes='1' osl_list='64' max_tokens=2048
+1: nvl72153-T18 61295 1 4
+0: nvl72153-T18 61295 0 4
+3: nvl72153-T18 61295 3 4
+2: nvl72153-T18 61295 2 4
+3: Requirement already satisfied: transformers in /usr/local/lib/python3.12/dist-packages (5.3.0)
+0: Requirement already satisfied: transformers in /usr/local/lib/python3.12/dist-packages (5.3.0)
+1: Requirement already satisfied: transformers in /usr/local/lib/python3.12/dist-packages (5.3.0)
+2: Requirement already satisfied: transformers in /usr/local/lib/python3.12/dist-packages (5.3.0)
+3: Requirement already satisfied: huggingface-hub<2.0,>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (1.5.0)
+3: Requirement already satisfied: numpy>=1.17 in /root/.local/lib/python3.12/site-packages (from transformers) (2.5.1)
+0: Requirement already satisfied: huggingface-hub<2.0,>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (1.5.0)
+1: Requirement already satisfied: huggingface-hub<2.0,>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (1.5.0)
+2: Requirement already satisfied: huggingface-hub<2.0,>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (1.5.0)
+3: Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (25.0)
+0: Requirement already satisfied: numpy>=1.17 in /root/.local/lib/python3.12/site-packages (from transformers) (2.5.1)
+3: Requirement already satisfied: pyyaml>=5.1 in /usr/lib/python3/dist-packages (from transformers) (6.0.1)
+1: Requirement already satisfied: numpy>=1.17 in /root/.local/lib/python3.12/site-packages (from transformers) (2.5.1)
+2: Requirement already satisfied: numpy>=1.17 in /root/.local/lib/python3.12/site-packages (from transformers) (2.5.1)
+0: Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (25.0)
+3: Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers) (2026.2.28)
+1: Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (25.0)
+2: Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (25.0)
+0: Requirement already satisfied: pyyaml>=5.1 in /usr/lib/python3/dist-packages (from transformers) (6.0.1)
+1: Requirement already satisfied: pyyaml>=5.1 in /usr/lib/python3/dist-packages (from transformers) (6.0.1)
+3: Requirement already satisfied: tokenizers<=0.23.0,>=0.22.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.22.2)
+2: Requirement already satisfied: pyyaml>=5.1 in /usr/lib/python3/dist-packages (from transformers) (6.0.1)
+3: Requirement already satisfied: typer in /usr/local/lib/python3.12/dist-packages (from transformers) (0.24.1)
+0: Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers) (2026.2.28)
+1: Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers) (2026.2.28)
+2: Requirement already satisfied: regex!=2019.12.17 in /usr/local/lib/python3.12/dist-packages (from transformers) (2026.2.28)
+3: Requirement already satisfied: safetensors>=0.4.3 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.7.0)
+0: Requirement already satisfied: tokenizers<=0.23.0,>=0.22.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.22.2)
+1: Requirement already satisfied: tokenizers<=0.23.0,>=0.22.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.22.2)
+3: Requirement already satisfied: tqdm>=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers) (4.67.3)
+2: Requirement already satisfied: tokenizers<=0.23.0,>=0.22.0 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.22.2)
+0: Requirement already satisfied: typer in /usr/local/lib/python3.12/dist-packages (from transformers) (0.24.1)
+1: Requirement already satisfied: typer in /usr/local/lib/python3.12/dist-packages (from transformers) (0.24.1)
+2: Requirement already satisfied: typer in /usr/local/lib/python3.12/dist-packages (from transformers) (0.24.1)
+0: Requirement already satisfied: safetensors>=0.4.3 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.7.0)
+1: Requirement already satisfied: safetensors>=0.4.3 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.7.0)
+0: Requirement already satisfied: tqdm>=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers) (4.67.3)
+2: Requirement already satisfied: safetensors>=0.4.3 in /usr/local/lib/python3.12/dist-packages (from transformers) (0.7.0)
+1: Requirement already satisfied: tqdm>=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers) (4.67.3)
+2: Requirement already satisfied: tqdm>=4.27 in /usr/local/lib/python3.12/dist-packages (from transformers) (4.67.3)
+3: Requirement already satisfied: filelock>=3.10.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (3.25.0)
+3: Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.0)
+0: Requirement already satisfied: filelock>=3.10.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (3.25.0)
+1: Requirement already satisfied: filelock>=3.10.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (3.25.0)
+3: Requirement already satisfied: hf-xet<2.0.0,>=1.2.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (1.3.2)
+0: Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.0)
+1: Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.0)
+3: Requirement already satisfied: httpx<1,>=0.23.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (0.28.1)
+2: Requirement already satisfied: filelock>=3.10.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (3.25.0)
+0: Requirement already satisfied: hf-xet<2.0.0,>=1.2.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (1.3.2)
+1: Requirement already satisfied: hf-xet<2.0.0,>=1.2.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (1.3.2)
+3: Requirement already satisfied: typing-extensions>=4.1.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (4.15.0)
+2: Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.0)
+0: Requirement already satisfied: httpx<1,>=0.23.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (0.28.1)
+1: Requirement already satisfied: httpx<1,>=0.23.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (0.28.1)
+0: Requirement already satisfied: typing-extensions>=4.1.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (4.15.0)
+1: Requirement already satisfied: typing-extensions>=4.1.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (4.15.0)
+2: Requirement already satisfied: hf-xet<2.0.0,>=1.2.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (1.3.2)
+2: Requirement already satisfied: httpx<1,>=0.23.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (0.28.1)
+2: Requirement already satisfied: typing-extensions>=4.1.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<2.0,>=1.3.0->transformers) (4.15.0)
+3: Requirement already satisfied: anyio in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (4.12.1)
+3: Requirement already satisfied: certifi in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.25)
+3: Requirement already satisfied: httpcore==1.* in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (1.0.9)
+0: Requirement already satisfied: anyio in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (4.12.1)
+1: Requirement already satisfied: anyio in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (4.12.1)
+3: Requirement already satisfied: idna in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (3.11)
+0: Requirement already satisfied: certifi in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.25)
+1: Requirement already satisfied: certifi in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.25)
+0: Requirement already satisfied: httpcore==1.* in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (1.0.9)
+0: Requirement already satisfied: idna in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (3.11)
+1: Requirement already satisfied: httpcore==1.* in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (1.0.9)
+2: Requirement already satisfied: anyio in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (4.12.1)
+1: Requirement already satisfied: idna in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (3.11)
+3: Requirement already satisfied: h11>=0.16 in /usr/local/lib/python3.12/dist-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (0.16.0)
+2: Requirement already satisfied: certifi in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (2026.2.25)
+2: Requirement already satisfied: httpcore==1.* in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (1.0.9)
+2: Requirement already satisfied: idna in /usr/local/lib/python3.12/dist-packages (from httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (3.11)
+0: Requirement already satisfied: h11>=0.16 in /usr/local/lib/python3.12/dist-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (0.16.0)
+1: Requirement already satisfied: h11>=0.16 in /usr/local/lib/python3.12/dist-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (0.16.0)
+2: Requirement already satisfied: h11>=0.16 in /usr/local/lib/python3.12/dist-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface-hub<2.0,>=1.3.0->transformers) (0.16.0)
+0: Requirement already satisfied: click>=8.2.1 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (8.3.1)
+3: Requirement already satisfied: click>=8.2.1 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (8.3.1)
+0: Requirement already satisfied: shellingham>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (1.5.4)
+3: Requirement already satisfied: shellingham>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (1.5.4)
+3: Requirement already satisfied: rich>=12.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (14.3.3)
+0: Requirement already satisfied: rich>=12.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (14.3.3)
+3: Requirement already satisfied: annotated-doc>=0.0.2 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (0.0.4)
+0: Requirement already satisfied: annotated-doc>=0.0.2 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (0.0.4)
+2: Requirement already satisfied: click>=8.2.1 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (8.3.1)
+2: Requirement already satisfied: shellingham>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (1.5.4)
+2: Requirement already satisfied: rich>=12.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (14.3.3)
+2: Requirement already satisfied: annotated-doc>=0.0.2 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (0.0.4)
+3: Requirement already satisfied: markdown-it-py>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from rich>=12.3.0->typer->transformers) (4.0.0)
+0: Requirement already satisfied: markdown-it-py>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from rich>=12.3.0->typer->transformers) (4.0.0)
+3: Requirement already satisfied: pygments<3.0.0,>=2.13.0 in /usr/lib/python3/dist-packages (from rich>=12.3.0->typer->transformers) (2.17.2)
+0: Requirement already satisfied: pygments<3.0.0,>=2.13.0 in /usr/lib/python3/dist-packages (from rich>=12.3.0->typer->transformers) (2.17.2)
+1: Requirement already satisfied: click>=8.2.1 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (8.3.1)
+1: Requirement already satisfied: shellingham>=1.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (1.5.4)
+1: Requirement already satisfied: rich>=12.3.0 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (14.3.3)
+2: Requirement already satisfied: markdown-it-py>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from rich>=12.3.0->typer->transformers) (4.0.0)
+1: Requirement already satisfied: annotated-doc>=0.0.2 in /usr/local/lib/python3.12/dist-packages (from typer->transformers) (0.0.4)
+2: Requirement already satisfied: pygments<3.0.0,>=2.13.0 in /usr/lib/python3/dist-packages (from rich>=12.3.0->typer->transformers) (2.17.2)
+3: Requirement already satisfied: mdurl~=0.1 in /usr/local/lib/python3.12/dist-packages (from markdown-it-py>=2.2.0->rich>=12.3.0->typer->transformers) (0.1.2)
+0: Requirement already satisfied: mdurl~=0.1 in /usr/local/lib/python3.12/dist-packages (from markdown-it-py>=2.2.0->rich>=12.3.0->typer->transformers) (0.1.2)
+2: Requirement already satisfied: mdurl~=0.1 in /usr/local/lib/python3.12/dist-packages (from markdown-it-py>=2.2.0->rich>=12.3.0->typer->transformers) (0.1.2)
+1: Requirement already satisfied: markdown-it-py>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from rich>=12.3.0->typer->transformers) (4.0.0)
+1: Requirement already satisfied: pygments<3.0.0,>=2.13.0 in /usr/lib/python3/dist-packages (from rich>=12.3.0->typer->transformers) (2.17.2)
+1: Requirement already satisfied: mdurl~=0.1 in /usr/local/lib/python3.12/dist-packages (from markdown-it-py>=2.2.0->rich>=12.3.0->typer->transformers) (0.1.2)
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: Requirement already satisfied: simpy in /usr/local/lib/python3.12/dist-packages (4.1.1)
+1: Requirement already satisfied: simpy in /usr/local/lib/python3.12/dist-packages (4.1.1)
+2: Requirement already satisfied: simpy in /usr/local/lib/python3.12/dist-packages (4.1.1)
+3: Requirement already satisfied: simpy in /usr/local/lib/python3.12/dist-packages (4.1.1)
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: Requirement already satisfied: sentencepiece in /usr/local/lib/python3.12/dist-packages (0.2.1)
+0: Requirement already satisfied: sentencepiece in /usr/local/lib/python3.12/dist-packages (0.2.1)
+3: Requirement already satisfied: sentencepiece in /usr/local/lib/python3.12/dist-packages (0.2.1)
+2: Requirement already satisfied: sentencepiece in /usr/local/lib/python3.12/dist-packages (0.2.1)
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: Requirement already satisfied: tiktoken in /usr/local/lib/python3.12/dist-packages (0.12.0)
+1: Requirement already satisfied: regex>=2022.1.18 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2026.2.28)
+1: Requirement already satisfied: requests>=2.26.0 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2.32.5)
+1: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.4.5)
+1: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.11)
+1: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2.6.3)
+1: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2026.2.25)
+0: Requirement already satisfied: tiktoken in /usr/local/lib/python3.12/dist-packages (0.12.0)
+0: Requirement already satisfied: regex>=2022.1.18 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2026.2.28)
+0: Requirement already satisfied: requests>=2.26.0 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2.32.5)
+0: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.4.5)
+0: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.11)
+0: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2.6.3)
+0: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2026.2.25)
+3: Requirement already satisfied: tiktoken in /usr/local/lib/python3.12/dist-packages (0.12.0)
+2: Requirement already satisfied: tiktoken in /usr/local/lib/python3.12/dist-packages (0.12.0)
+3: Requirement already satisfied: regex>=2022.1.18 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2026.2.28)
+3: Requirement already satisfied: requests>=2.26.0 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2.32.5)
+2: Requirement already satisfied: regex>=2022.1.18 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2026.2.28)
+2: Requirement already satisfied: requests>=2.26.0 in /usr/local/lib/python3.12/dist-packages (from tiktoken) (2.32.5)
+3: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.4.5)
+3: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.11)
+2: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.4.5)
+3: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2.6.3)
+2: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (3.11)
+3: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2026.2.25)
+2: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2.6.3)
+2: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests>=2.26.0->tiktoken) (2026.2.25)
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: Requirement already satisfied: hypercorn in /usr/local/lib/python3.12/dist-packages (0.18.0)
+1: Requirement already satisfied: hypercorn in /usr/local/lib/python3.12/dist-packages (0.18.0)
+0: Requirement already satisfied: flask[async] in /usr/local/lib/python3.12/dist-packages (3.1.3)
+1: Requirement already satisfied: flask[async] in /usr/local/lib/python3.12/dist-packages (3.1.3)
+0: Requirement already satisfied: blinker>=1.9.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (1.9.0)
+1: Requirement already satisfied: blinker>=1.9.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (1.9.0)
+0: Requirement already satisfied: click>=8.1.3 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (8.3.1)
+1: Requirement already satisfied: click>=8.1.3 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (8.3.1)
+0: Requirement already satisfied: itsdangerous>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (2.2.0)
+1: Requirement already satisfied: itsdangerous>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (2.2.0)
+0: Requirement already satisfied: jinja2>=3.1.2 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+1: Requirement already satisfied: jinja2>=3.1.2 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+0: Requirement already satisfied: markupsafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.0.3)
+1: Requirement already satisfied: markupsafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.0.3)
+0: Requirement already satisfied: werkzeug>=3.1.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+1: Requirement already satisfied: werkzeug>=3.1.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+3: Requirement already satisfied: hypercorn in /usr/local/lib/python3.12/dist-packages (0.18.0)
+2: Requirement already satisfied: hypercorn in /usr/local/lib/python3.12/dist-packages (0.18.0)
+3: Requirement already satisfied: flask[async] in /usr/local/lib/python3.12/dist-packages (3.1.3)
+2: Requirement already satisfied: flask[async] in /usr/local/lib/python3.12/dist-packages (3.1.3)
+3: Requirement already satisfied: blinker>=1.9.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (1.9.0)
+2: Requirement already satisfied: blinker>=1.9.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (1.9.0)
+3: Requirement already satisfied: click>=8.1.3 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (8.3.1)
+2: Requirement already satisfied: click>=8.1.3 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (8.3.1)
+3: Requirement already satisfied: itsdangerous>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (2.2.0)
+2: Requirement already satisfied: itsdangerous>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (2.2.0)
+3: Requirement already satisfied: jinja2>=3.1.2 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+3: Requirement already satisfied: markupsafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.0.3)
+2: Requirement already satisfied: jinja2>=3.1.2 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+3: Requirement already satisfied: werkzeug>=3.1.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+2: Requirement already satisfied: markupsafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.0.3)
+2: Requirement already satisfied: werkzeug>=3.1.0 in /usr/local/lib/python3.12/dist-packages (from flask[async]) (3.1.6)
+0: Collecting asgiref>=3.2 (from flask[async])
+0:   Using cached asgiref-3.12.1-py3-none-any.whl.metadata (9.4 kB)
+3: Collecting asgiref>=3.2 (from flask[async])
+0: Requirement already satisfied: h11 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (0.16.0)
+0: Requirement already satisfied: h2>=4.3.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (4.3.0)
+0: Requirement already satisfied: priority in /usr/local/lib/python3.12/dist-packages (from hypercorn) (2.0.0)
+3:   Using cached asgiref-3.12.1-py3-none-any.whl.metadata (9.4 kB)
+0: Requirement already satisfied: wsproto>=0.14.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (1.3.2)
+0: Requirement already satisfied: hyperframe<7,>=6.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (6.1.0)
+0: Requirement already satisfied: hpack<5,>=4.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (4.1.0)
+3: Requirement already satisfied: h11 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (0.16.0)
+1: Collecting asgiref>=3.2 (from flask[async])
+3: Requirement already satisfied: h2>=4.3.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (4.3.0)
+3: Requirement already satisfied: priority in /usr/local/lib/python3.12/dist-packages (from hypercorn) (2.0.0)
+3: Requirement already satisfied: wsproto>=0.14.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (1.3.2)
+1:   Using cached asgiref-3.12.1-py3-none-any.whl.metadata (9.4 kB)
+3: Requirement already satisfied: hyperframe<7,>=6.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (6.1.0)
+3: Requirement already satisfied: hpack<5,>=4.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (4.1.0)
+2: Collecting asgiref>=3.2 (from flask[async])
+1: Requirement already satisfied: h11 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (0.16.0)
+1: Requirement already satisfied: h2>=4.3.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (4.3.0)
+1: Requirement already satisfied: priority in /usr/local/lib/python3.12/dist-packages (from hypercorn) (2.0.0)
+1: Requirement already satisfied: wsproto>=0.14.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (1.3.2)
+2:   Using cached asgiref-3.12.1-py3-none-any.whl.metadata (9.4 kB)
+1: Requirement already satisfied: hyperframe<7,>=6.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (6.1.0)
+1: Requirement already satisfied: hpack<5,>=4.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (4.1.0)
+0: Using cached asgiref-3.12.1-py3-none-any.whl (25 kB)
+2: Requirement already satisfied: h11 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (0.16.0)
+3: Using cached asgiref-3.12.1-py3-none-any.whl (25 kB)
+2: Requirement already satisfied: h2>=4.3.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (4.3.0)
+2: Requirement already satisfied: priority in /usr/local/lib/python3.12/dist-packages (from hypercorn) (2.0.0)
+2: Requirement already satisfied: wsproto>=0.14.0 in /usr/local/lib/python3.12/dist-packages (from hypercorn) (1.3.2)
+2: Requirement already satisfied: hyperframe<7,>=6.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (6.1.0)
+2: Requirement already satisfied: hpack<5,>=4.1 in /usr/local/lib/python3.12/dist-packages (from h2>=4.3.0->hypercorn) (4.1.0)
+1: Using cached asgiref-3.12.1-py3-none-any.whl (25 kB)
+2: Using cached asgiref-3.12.1-py3-none-any.whl (25 kB)
+0: Installing collected packages: asgiref
+1: Installing collected packages: asgiref
+3: Installing collected packages: asgiref
+2: Installing collected packages: asgiref
+0: Successfully installed asgiref-3.12.1
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: Successfully installed asgiref-3.12.1
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: Successfully installed asgiref-3.12.1
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: Successfully installed asgiref-3.12.1
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: Requirement already satisfied: flashinfer-python in /usr/local/lib/python3.12/dist-packages (0.6.8)
+0: Requirement already satisfied: flashinfer-cubin in /usr/local/lib/python3.12/dist-packages (0.6.8)
+1: Requirement already satisfied: flashinfer-python in /usr/local/lib/python3.12/dist-packages (0.6.8)
+0: Requirement already satisfied: apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.1.9)
+0: Requirement already satisfied: click in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (8.3.1)
+1: Requirement already satisfied: flashinfer-cubin in /usr/local/lib/python3.12/dist-packages (0.6.8)
+0: Requirement already satisfied: cuda-tile in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.1.0)
+0: Requirement already satisfied: einops in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.8.2)
+0: Requirement already satisfied: ninja in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.13.0)
+1: Requirement already satisfied: apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.1.9)
+0: Requirement already satisfied: numpy in /root/.local/lib/python3.12/site-packages (from flashinfer-python) (2.5.1)
+1: Requirement already satisfied: click in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (8.3.1)
+0: Requirement already satisfied: nvidia-cudnn-frontend>=1.13.0 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.18.0)
+1: Requirement already satisfied: cuda-tile in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.1.0)
+0: Requirement already satisfied: nvidia-cutlass-dsl>=4.4.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.4.2)
+1: Requirement already satisfied: einops in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.8.2)
+0: Requirement already satisfied: nvidia-ml-py in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (13.590.48)
+1: Requirement already satisfied: ninja in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.13.0)
+0: Requirement already satisfied: packaging>=24.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (25.0)
+1: Requirement already satisfied: numpy in /root/.local/lib/python3.12/site-packages (from flashinfer-python) (2.5.1)
+0: Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.32.5)
+1: Requirement already satisfied: nvidia-cudnn-frontend>=1.13.0 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.18.0)
+0: Requirement already satisfied: tabulate in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.10.0)
+1: Requirement already satisfied: nvidia-cutlass-dsl>=4.4.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.4.2)
+0: Requirement already satisfied: torch in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.11.0a0+a6c236b9fd.nvinternal.main.45507469)
+0: Requirement already satisfied: tqdm in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.67.3)
+1: Requirement already satisfied: nvidia-ml-py in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (13.590.48)
+1: Requirement already satisfied: packaging>=24.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (25.0)
+1: Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.32.5)
+0: Requirement already satisfied: typing-extensions>=4.5 in /usr/local/lib/python3.12/dist-packages (from apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6->flashinfer-python) (4.15.0)
+1: Requirement already satisfied: tabulate in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.10.0)
+1: Requirement already satisfied: torch in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.11.0a0+a6c236b9fd.nvinternal.main.45507469)
+3: Requirement already satisfied: flashinfer-python in /usr/local/lib/python3.12/dist-packages (0.6.8)
+1: Requirement already satisfied: tqdm in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.67.3)
+3: Requirement already satisfied: flashinfer-cubin in /usr/local/lib/python3.12/dist-packages (0.6.8)
+0: Requirement already satisfied: nvidia-cutlass-dsl-libs-base==4.4.2 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (4.4.2)
+1: Requirement already satisfied: typing-extensions>=4.5 in /usr/local/lib/python3.12/dist-packages (from apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6->flashinfer-python) (4.15.0)
+3: Requirement already satisfied: apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.1.9)
+3: Requirement already satisfied: click in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (8.3.1)
+0: Requirement already satisfied: cuda-python>=12.8 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+3: Requirement already satisfied: cuda-tile in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.1.0)
+3: Requirement already satisfied: einops in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.8.2)
+3: Requirement already satisfied: ninja in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.13.0)
+1: Requirement already satisfied: nvidia-cutlass-dsl-libs-base==4.4.2 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (4.4.2)
+0: Requirement already satisfied: cuda-bindings~=13.1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+3: Requirement already satisfied: numpy in /root/.local/lib/python3.12/site-packages (from flashinfer-python) (2.5.1)
+0: Requirement already satisfied: cuda-pathfinder~=1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (1.4.0)
+3: Requirement already satisfied: nvidia-cudnn-frontend>=1.13.0 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.18.0)
+3: Requirement already satisfied: nvidia-cutlass-dsl>=4.4.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.4.2)
+1: Requirement already satisfied: cuda-python>=12.8 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+3: Requirement already satisfied: nvidia-ml-py in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (13.590.48)
+3: Requirement already satisfied: packaging>=24.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (25.0)
+3: Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.32.5)
+1: Requirement already satisfied: cuda-bindings~=13.1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+3: Requirement already satisfied: tabulate in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.10.0)
+1: Requirement already satisfied: cuda-pathfinder~=1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (1.4.0)
+3: Requirement already satisfied: torch in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.11.0a0+a6c236b9fd.nvinternal.main.45507469)
+3: Requirement already satisfied: tqdm in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.67.3)
+3: Requirement already satisfied: typing-extensions>=4.5 in /usr/local/lib/python3.12/dist-packages (from apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6->flashinfer-python) (4.15.0)
+3: Requirement already satisfied: nvidia-cutlass-dsl-libs-base==4.4.2 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (4.4.2)
+3: Requirement already satisfied: cuda-python>=12.8 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+2: Requirement already satisfied: flashinfer-python in /usr/local/lib/python3.12/dist-packages (0.6.8)
+2: Requirement already satisfied: flashinfer-cubin in /usr/local/lib/python3.12/dist-packages (0.6.8)
+3: Requirement already satisfied: cuda-bindings~=13.1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+0: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.4.5)
+3: Requirement already satisfied: cuda-pathfinder~=1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (1.4.0)
+0: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.11)
+0: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2.6.3)
+2: Requirement already satisfied: apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.1.9)
+0: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2026.2.25)
+2: Requirement already satisfied: click in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (8.3.1)
+2: Requirement already satisfied: cuda-tile in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.1.0)
+2: Requirement already satisfied: einops in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.8.2)
+1: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.4.5)
+2: Requirement already satisfied: ninja in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.13.0)
+1: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.11)
+2: Requirement already satisfied: numpy in /root/.local/lib/python3.12/site-packages (from flashinfer-python) (2.5.1)
+1: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2.6.3)
+2: Requirement already satisfied: nvidia-cudnn-frontend>=1.13.0 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (1.18.0)
+2: Requirement already satisfied: nvidia-cutlass-dsl>=4.4.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.4.2)
+1: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2026.2.25)
+2: Requirement already satisfied: nvidia-ml-py in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (13.590.48)
+2: Requirement already satisfied: packaging>=24.2 in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (25.0)
+2: Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.32.5)
+2: Requirement already satisfied: tabulate in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (0.10.0)
+2: Requirement already satisfied: torch in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (2.11.0a0+a6c236b9fd.nvinternal.main.45507469)
+2: Requirement already satisfied: tqdm in /usr/local/lib/python3.12/dist-packages (from flashinfer-python) (4.67.3)
+2: Requirement already satisfied: typing-extensions>=4.5 in /usr/local/lib/python3.12/dist-packages (from apache-tvm-ffi!=0.1.8,!=0.1.8.post0,<0.2,>=0.1.6->flashinfer-python) (4.15.0)
+0: Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.25.0)
+0: Requirement already satisfied: setuptools in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (81.0.0)
+0: Requirement already satisfied: sympy>=1.13.3 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (1.14.0)
+3: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.4.5)
+0: Requirement already satisfied: networkx>=2.5.1 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.6.1)
+3: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.11)
+0: Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.1.6)
+2: Requirement already satisfied: nvidia-cutlass-dsl-libs-base==4.4.2 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (4.4.2)
+3: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2.6.3)
+0: Requirement already satisfied: fsspec>=0.8.5 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (2026.2.0)
+3: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2026.2.25)
+1: Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.25.0)
+2: Requirement already satisfied: cuda-python>=12.8 in /usr/local/lib/python3.12/dist-packages (from nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+1: Requirement already satisfied: setuptools in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (81.0.0)
+1: Requirement already satisfied: sympy>=1.13.3 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (1.14.0)
+2: Requirement already satisfied: cuda-bindings~=13.1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (13.1.1)
+1: Requirement already satisfied: networkx>=2.5.1 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.6.1)
+1: Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.1.6)
+2: Requirement already satisfied: cuda-pathfinder~=1.1 in /usr/local/lib/python3.12/dist-packages (from cuda-python>=12.8->nvidia-cutlass-dsl-libs-base==4.4.2->nvidia-cutlass-dsl>=4.4.2->flashinfer-python) (1.4.0)
+1: Requirement already satisfied: fsspec>=0.8.5 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (2026.2.0)
+3: Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.25.0)
+3: Requirement already satisfied: setuptools in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (81.0.0)
+3: Requirement already satisfied: sympy>=1.13.3 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (1.14.0)
+0: Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.3->torch->flashinfer-python) (1.3.0)
+3: Requirement already satisfied: networkx>=2.5.1 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.6.1)
+3: Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.1.6)
+3: Requirement already satisfied: fsspec>=0.8.5 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (2026.2.0)
+0: Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch->flashinfer-python) (3.0.3)
+2: Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.4.5)
+1: Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.3->torch->flashinfer-python) (1.3.0)
+2: Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (3.11)
+2: Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2.6.3)
+2: Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->flashinfer-python) (2026.2.25)
+1: Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch->flashinfer-python) (3.0.3)
+3: Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.3->torch->flashinfer-python) (1.3.0)
+2: Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.25.0)
+2: Requirement already satisfied: setuptools in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (81.0.0)
+2: Requirement already satisfied: sympy>=1.13.3 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (1.14.0)
+3: Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch->flashinfer-python) (3.0.3)
+2: Requirement already satisfied: networkx>=2.5.1 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.6.1)
+2: Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (3.1.6)
+2: Requirement already satisfied: fsspec>=0.8.5 in /usr/local/lib/python3.12/dist-packages (from torch->flashinfer-python) (2026.2.0)
+2: Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.3->torch->flashinfer-python) (1.3.0)
+2: Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch->flashinfer-python) (3.0.3)
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: Looking in indexes: https://flashinfer.ai/whl/cu130
+0: Requirement already satisfied: flashinfer-jit-cache in /usr/local/lib/python3.12/dist-packages (0.6.8+cu130)
+1: Looking in indexes: https://flashinfer.ai/whl/cu130
+1: Requirement already satisfied: flashinfer-jit-cache in /usr/local/lib/python3.12/dist-packages (0.6.8+cu130)
+3: Looking in indexes: https://flashinfer.ai/whl/cu130
+3: Requirement already satisfied: flashinfer-jit-cache in /usr/local/lib/python3.12/dist-packages (0.6.8+cu130)
+2: Looking in indexes: https://flashinfer.ai/whl/cu130
+2: Requirement already satisfied: flashinfer-jit-cache in /usr/local/lib/python3.12/dist-packages (0.6.8+cu130)
+1: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+0: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+3: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+2: WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+1: nsys profile -t cuda,nvtx --cuda-event-trace=false --cuda-graph-trace=node --wait all -o inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_%q{RANK} --force-overwrite true --sample=none --session=moe_server_%q{RANK} --resolve-symbols false python -m tools.run_dynamic_text_generation_server --micro-batch-size 1 --bf16 --te-rng-tracker --inference-rng-tracker --inference-dynamic-batching --inference-dynamic-batching-unified-memory-level 0 --use-flashinfer-fused-rope --inference-dynamic-batching-max-tokens 2048 --inference-dynamic-batching-mamba-memory-ratio 0.21 --enable-chunked-prefill --use-flashinfer-fused-rope --sequence-parallel --pretrained-checkpoint /lustre/fsw/portfolios/llmservice/projects/llmservice_nlp_fm/nemotron6/12b_hybrid_moe/checkpoints/pre_training_final_lc --load /lustre/fsw/portfolios/llmservice/users/ksanthanam/nemotron-3-super-120b --use-checkpoint-args --model-provider mamba --tensor-model-parallel-size 1 --expert-model-parallel-size 4 --expert-tensor-paralle
+1: l-size 1 --dist-ckpt-strictness log_unexpected --moe-token-dispatcher-type alltoall --seq-length 73728 --max-position-embeddings 73728 --inference-max-seq-length 73728 --moe-grouped-gemm --transformer-impl inference_optimized --inference-grouped-gemm-backend vllm --inference-use-synchronous-zmq-collectives --moe-router-dtype fp32 --mtp-use-repeated-layer --inference-dynamic-batching-buffer-size-gb 70 --moe-shared-expert-overlap --inference-dynamic-batching-num-cuda-graphs -1 --cuda-graph-impl local --cuda-graph-scope full_iteration_inference --inference-logging-step-interval 1000 --inference-moe-token-dispatcher-type nvls
+0: nsys profile -t cuda,nvtx --cuda-event-trace=false --cuda-graph-trace=node --wait all -o inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_%q{RANK} --force-overwrite true --sample=none --session=moe_server_%q{RANK} --resolve-symbols false python -m tools.run_dynamic_text_generation_server --micro-batch-size 1 --bf16 --te-rng-tracker --inference-rng-tracker --inference-dynamic-batching --inference-dynamic-batching-unified-memory-level 0 --use-flashinfer-fused-rope --inference-dynamic-batching-max-tokens 2048 --inference-dynamic-batching-mamba-memory-ratio 0.21 --enable-chunked-prefill --use-flashinfer-fused-rope --sequence-parallel --pretrained-checkpoint /lustre/fsw/portfolios/llmservice/projects/llmservice_nlp_fm/nemotron6/12b_hybrid_moe/checkpoints/pre_training_final_lc --load /lustre/fsw/portfolios/llmservice/users/ksanthanam/nemotron-3-super-120b --use-checkpoint-args --model-provider mamba --tensor-model-parallel-size 1 --expert-model-parallel-size 4 --expert-tensor-paralle
+0: l-size 1 --dist-ckpt-strictness log_unexpected --moe-token-dispatcher-type alltoall --seq-length 73728 --max-position-embeddings 73728 --inference-max-seq-length 73728 --moe-grouped-gemm --transformer-impl inference_optimized --inference-grouped-gemm-backend vllm --inference-use-synchronous-zmq-collectives --moe-router-dtype fp32 --mtp-use-repeated-layer --inference-dynamic-batching-buffer-size-gb 70 --moe-shared-expert-overlap --inference-dynamic-batching-num-cuda-graphs -1 --cuda-graph-impl local --cuda-graph-scope full_iteration_inference --inference-logging-step-interval 1000 --inference-moe-token-dispatcher-type nvls
+0: Waiting for server to be ready...
+3: nsys profile -t cuda,nvtx --cuda-event-trace=false --cuda-graph-trace=node --wait all -o inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_%q{RANK} --force-overwrite true --sample=none --session=moe_server_%q{RANK} --resolve-symbols false python -m tools.run_dynamic_text_generation_server --micro-batch-size 1 --bf16 --te-rng-tracker --inference-rng-tracker --inference-dynamic-batching --inference-dynamic-batching-unified-memory-level 0 --use-flashinfer-fused-rope --inference-dynamic-batching-max-tokens 2048 --inference-dynamic-batching-mamba-memory-ratio 0.21 --enable-chunked-prefill --use-flashinfer-fused-rope --sequence-parallel --pretrained-checkpoint /lustre/fsw/portfolios/llmservice/projects/llmservice_nlp_fm/nemotron6/12b_hybrid_moe/checkpoints/pre_training_final_lc --load /lustre/fsw/portfolios/llmservice/users/ksanthanam/nemotron-3-super-120b --use-checkpoint-args --model-provider mamba --tensor-model-parallel-size 1 --expert-model-parallel-size 4 --expert-tensor-paralle
+3: l-size 1 --dist-ckpt-strictness log_unexpected --moe-token-dispatcher-type alltoall --seq-length 73728 --max-position-embeddings 73728 --inference-max-seq-length 73728 --moe-grouped-gemm --transformer-impl inference_optimized --inference-grouped-gemm-backend vllm --inference-use-synchronous-zmq-collectives --moe-router-dtype fp32 --mtp-use-repeated-layer --inference-dynamic-batching-buffer-size-gb 70 --moe-shared-expert-overlap --inference-dynamic-batching-num-cuda-graphs -1 --cuda-graph-impl local --cuda-graph-scope full_iteration_inference --inference-logging-step-interval 1000 --inference-moe-token-dispatcher-type nvls
+2: nsys profile -t cuda,nvtx --cuda-event-trace=false --cuda-graph-trace=node --wait all -o inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_%q{RANK} --force-overwrite true --sample=none --session=moe_server_%q{RANK} --resolve-symbols false python -m tools.run_dynamic_text_generation_server --micro-batch-size 1 --bf16 --te-rng-tracker --inference-rng-tracker --inference-dynamic-batching --inference-dynamic-batching-unified-memory-level 0 --use-flashinfer-fused-rope --inference-dynamic-batching-max-tokens 2048 --inference-dynamic-batching-mamba-memory-ratio 0.21 --enable-chunked-prefill --use-flashinfer-fused-rope --sequence-parallel --pretrained-checkpoint /lustre/fsw/portfolios/llmservice/projects/llmservice_nlp_fm/nemotron6/12b_hybrid_moe/checkpoints/pre_training_final_lc --load /lustre/fsw/portfolios/llmservice/users/ksanthanam/nemotron-3-super-120b --use-checkpoint-args --model-provider mamba --tensor-model-parallel-size 1 --expert-model-parallel-size 4 --expert-tensor-paralle
+2: l-size 1 --dist-ckpt-strictness log_unexpected --moe-token-dispatcher-type alltoall --seq-length 73728 --max-position-embeddings 73728 --inference-max-seq-length 73728 --moe-grouped-gemm --transformer-impl inference_optimized --inference-grouped-gemm-backend vllm --inference-use-synchronous-zmq-collectives --moe-router-dtype fp32 --mtp-use-repeated-layer --inference-dynamic-batching-buffer-size-gb 70 --moe-shared-expert-overlap --inference-dynamic-batching-num-cuda-graphs -1 --cuda-graph-impl local --cuda-graph-scope full_iteration_inference --inference-logging-step-interval 1000 --inference-moe-token-dispatcher-type nvls
+0: Server ready, running benchmark...
+0: Loading GSM8K dataset from HuggingFace...
+0: Loaded 8792 prompts from GSM8K.
+0: Server          : http://localhost:5000/v1
+0: Model           : superv3
+0: Batch size      : 1
+0: ISL             : variable  data: gsm8k
+0: Output tokens   : 64
+0: Warmup iters    : 0
+0: Timed iters     : 1
+0: Iter 1/1: wall=751 ms, throughput=85.2 tok/s, avg_latency=751 ms
+0:   --- 2 sample(s) ---
+0:   Q: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natali
+0:   A: **Answer:** 72  
+0: **Explanation:**  
+0: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May.  
+0: Half of 48 = 48/2 = 24  
+0: Total number of
+0: 
+0: 
+0: ==================================================
+0: RESULTS (avg over 1 iters)
+0: ==================================================
+0: Model           : superv3
+0: Batch size      : 1
+0: ISL             : variable  data: gsm8k
+0: Output tokens   : 64
+0:   Input tokens    : 38.0 tok/batch
+0:   Throughput      : 85.2 tok/s
+0:   Wall latency    : 751 ms
+0:   Avg req latency : 751 ms
+0:   P50 req latency : 751 ms
+0:   P99 req latency : 751 ms
+0:   ms/output token : 11.74 ms/tok
+0: 0 is about to dump nsys data
+0:               ID         TIME                                      STATE LAUNCH NAME
+0:         10745862        05:59                                 Collection      1 moe_server_1
+0:         11745928        05:59                                 Collection      1 moe_server_2
+0:         12745947        05:59                                 Collection      1 moe_server_3
+0:         13745966        05:59                                 Collection      1 moe_server_0
+0: Generating '/tmp/nsys-report-4a8f.qdstrm'
+0: [1/1] [0%                          ] prof_rank_0.nsys-rep[1/1] [0%                          ] prof_rank_0.nsys-rep[1/1] [5%                          ] prof_rank_0.nsys-rep[1/1] [6%                          ] prof_rank_0.nsys-rep[1/1] [5%                          ] prof_rank_0.nsys-rep[1/1] [6%                          ] prof_rank_0.nsys-rep[1/1] [5%                          ] prof_rank_0.nsys-rep[1/1] [6%                          ] prof_rank_0.nsys-rep[1/1] [5%                          ] prof_rank_0.nsys-rep[1/1] [6%                          ] prof_rank_0.nsys-rep[1/1] [7%                          ] prof_rank_0.nsys-rep[1/1] [8%                          ] prof_rank_0.nsys-rep[1/1] [12%                         ] prof_rank_0.nsys-rep[1/1] [11%                         ] prof_rank_0.nsys-rep[1/1] [12%                         ] prof_rank_0.nsys-rep[1/1] [11%                         ] prof_rank_0.nsys-rep[1/1] [=15%                        ] prof_rank_0.nsys-rep[1/1] [14%                         ] 
+0: prof_rank_0.nsys-rep[1/1] [==18%                       ] prof_rank_0.nsys-rep[1/1] [=17%                        ] prof_rank_0.nsys-rep[1/1] [=16%                        ] prof_rank_0.nsys-rep[1/1] [==20%                       ] prof_rank_0.nsys-rep[1/1] [==19%                       ] prof_rank_0.nsys-rep[1/1] [==18%                       ] prof_rank_0.nsys-rep[1/1] [==21%                       ] prof_rank_0.nsys-rep[1/1] [==20%                       ] prof_rank_0.nsys-rep[1/1] [==19%                       ] prof_rank_0.nsys-rep[1/1] [==18%                       ] prof_rank_0.nsys-rep[1/1] [=17%                        ] prof_rank_0.nsys-rep[1/1] [=16%                        ] prof_rank_0.nsys-rep[1/1] [=15%                        ] prof_rank_0.nsys-rep[1/1] [14%                         ] prof_rank_0.nsys-rep[1/1] [13%                         ] prof_rank_0.nsys-rep[1/1] [12%                         ] prof_rank_0.nsys-rep[1/1] [13%                         ] prof_rank_0.nsys-rep[1/1] [14%       
+0:                   ] prof_rank_0.nsys-rep[1/1] [=15%                        ] prof_rank_0.nsys-rep[1/1] [=16%                        ] prof_rank_0.nsys-rep[1/1] [=17%                        ] prof_rank_0.nsys-rep[1/1] [==18%                       ] prof_rank_0.nsys-rep[1/1] [==19%                       ] prof_rank_0.nsys-rep[1/1] [==20%                       ] prof_rank_0.nsys-rep[1/1] [==21%                       ] prof_rank_0.nsys-rep[1/1] [===22%                      ] prof_rank_0.nsys-rep[1/1] [===23%                      ] prof_rank_0.nsys-rep[1/1] [===24%                      ] prof_rank_0.nsys-rep[1/1] [====25%                     ] prof_rank_0.nsys-rep[1/1] [====26%                     ] prof_rank_0.nsys-rep[1/1] [====27%                     ] prof_rank_0.nsys-rep[1/1] [====28%                     ] prof_rank_0.nsys-rep[1/1] [=====29%                    ] prof_rank_0.nsys-rep[1/1] [=====30%                    ] prof_rank_0.nsys-rep[1/1] [=====31%                    ] prof_rank_0.nsys-r
+0: ep[1/1] [=====32%                    ] prof_rank_0.nsys-rep[1/1] [======33%                   ] prof_rank_0.nsys-rep[1/1] [======34%                   ] prof_rank_0.nsys-rep[1/1] [======35%                   ] prof_rank_0.nsys-rep[1/1] [=======36%                  ] prof_rank_0.nsys-rep[1/1] [=======37%                  ] prof_rank_0.nsys-rep[1/1] [=======38%                  ] prof_rank_0.nsys-rep[1/1] [=======39%                  ] prof_rank_0.nsys-rep[1/1] [========40%                 ] prof_rank_0.nsys-rep[1/1] [========41%                 ] prof_rank_0.nsys-rep[1/1] [========42%                 ] prof_rank_0.nsys-rep[1/1] [=========43%                ] prof_rank_0.nsys-rep[1/1] [=========44%                ] prof_rank_0.nsys-rep[1/1] [=========45%                ] prof_rank_0.nsys-rep[1/1] [=========46%                ] prof_rank_0.nsys-rep[1/1] [==========47%               ] prof_rank_0.nsys-rep[1/1] [==========48%               ] prof_rank_0.nsys-rep[1/1] [==========49%               
+0: ] prof_rank_0.nsys-rep[1/1] [===========50%              ] prof_rank_0.nsys-rep[1/1] [===========51%              ] prof_rank_0.nsys-rep[1/1] [===========52%              ] prof_rank_0.nsys-rep[1/1] [===========53%              ] prof_rank_0.nsys-rep[1/1] [============54%             ] prof_rank_0.nsys-rep[1/1] [============55%             ] prof_rank_0.nsys-rep[1/1] [============56%             ] prof_rank_0.nsys-rep[1/1] [============57%             ] prof_rank_0.nsys-rep[1/1] [=============58%            ] prof_rank_0.nsys-rep[1/1] [=============59%            ] prof_rank_0.nsys-rep[1/1] [=============60%            ] prof_rank_0.nsys-rep[1/1] [==============61%           ] prof_rank_0.nsys-rep[1/1] [========================100%] prof_rank_0.nsys-rep[1/1] [========================100%] prof_rank_0.nsys-rep
+0: Generated:
+0: 	/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/Megatron-LM/inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_0.nsys-rep
+0: 0 has dumped nsys data
+1: 1 is about to dump nsys data
+3: 3 is about to dump nsys data
+2: 2 is about to dump nsys data
+1:               ID         TIME                                      STATE LAUNCH NAME
+1:         10745862        06:56                                 Collection      1 moe_server_1
+1:         11745928        06:56                                 Collection      1 moe_server_2
+1:         12745947        06:56                                 Collection      1 moe_server_3
+1:         13745966        06:56                                   Launched      1 moe_server_0
+2:               ID         TIME                                      STATE LAUNCH NAME
+2:         10745862        06:56                                 Collection      1 moe_server_1
+2:         11745928        06:56                                 Collection      1 moe_server_2
+2:         12745947        06:56                                 Collection      1 moe_server_3
+2:         13745966        06:56                                   Launched      1 moe_server_0
+3:               ID         TIME                                      STATE LAUNCH NAME
+3:         10745862        06:56                                 Collection      1 moe_server_1
+3:         11745928        06:56                                 Collection      1 moe_server_2
+3:         12745947        06:56                                 Collection      1 moe_server_3
+3:         13745966        06:56                                   Launched      1 moe_server_0
+1: Generating '/tmp/nsys-report-6c6a.qdstrm'
+1: [1/1] [0%                          ] prof_rank_1.nsys-rep[1/1] [0%                          ] prof_rank_1.nsys-rep[1/1] [5%                          ] prof_rank_1.nsys-rep[1/1] [7%                          ] prof_rank_1.nsys-rep[1/1] [12%                         ] prof_rank_1.nsys-rep[1/1] [11%                         ] prof_rank_1.nsys-rep[1/1] [=16%                        ] prof_rank_1.nsys-rep[1/1] [=15%                        ] prof_rank_1.nsys-rep[1/1] [=16%                        ] prof_rank_1.nsys-rep[1/1] [=15%                        ] prof_rank_1.nsys-rep[1/1] [=16%                        ] prof_rank_1.nsys-rep[1/1] [=15%                        ] prof_rank_1.nsys-rep[1/1] [==19%                       ] prof_rank_1.nsys-rep[1/1] [==18%                       ] prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [==21%                       ] prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [==21%                       ] 
+1: prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [==21%                       ] prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [==21%                       ] prof_rank_1.nsys-rep[1/1] [===24%                      ] prof_rank_1.nsys-rep[1/1] [===23%                      ] prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [==21%                       ] prof_rank_1.nsys-rep[1/1] [==20%                       ] prof_rank_1.nsys-rep[1/1] [==19%                       ] prof_rank_1.nsys-rep[1/1] [==18%                       ] prof_rank_1.nsys-rep[1/1] [=17%                        ] prof_rank_1.nsys-rep[1/1] [=16%                        ] prof_rank_1.nsys-rep[1/1] [=15%                        ] prof_rank_1.nsys-rep[1/1] [14%                         ] prof_rank_1.nsys-rep[1/1] [13%                         ] prof_rank_1.nsys-rep[1/1] [14%                         ] prof_rank_1.nsys-rep[1/1] [=15%      
+3: Generating '/tmp/nsys-report-0f2b.qdstrm'
+3: [1/1] [0%                          ] prof_rank_3.nsys-rep[1/1] [0%                          ] prof_rank_3.nsys-rep[1/1] [5%                          ] prof_rank_3.nsys-rep[1/1] [6%                          ] prof_rank_3.nsys-rep[1/1] [5%                          ] prof_rank_3.nsys-rep[1/1] [5%                          ] prof_rank_3.nsys-rep[1/1] [7%                          ] prof_rank_3.nsys-rep[1/1] [12%                         ] prof_rank_3.nsys-rep[1/1] [11%                         ] prof_rank_3.nsys-rep[1/1] [12%                         ] prof_rank_3.nsys-rep[1/1] [11%                         ] prof_rank_3.nsys-rep[1/1] [=15%                        ] prof_rank_3.nsys-rep[1/1] [==19%                       ] prof_rank_3.nsys-rep[1/1] [==18%                       ] prof_rank_3.nsys-rep[1/1] [=17%                        ] prof_rank_3.nsys-rep[1/1] [==21%                       ] prof_rank_3.nsys-rep[1/1] [==20%                       ] prof_rank_3.nsys-rep[1/1] [===23%                      ] 
+2: Generating '/tmp/nsys-report-e3f5.qdstrm'
+1:                   ] prof_rank_1.nsys-rep[1/1] [=16%                        ] prof_rank_1.nsys-rep[1/1] [=17%                        ] prof_rank_1.nsys-rep[1/1] [==18%                       ] prof_rank_1.nsys-rep[1/1] [==19%                       ] prof_rank_1.nsys-rep[1/1] [==20%                       ] prof_rank_1.nsys-rep[1/1] [==21%                       ] prof_rank_1.nsys-rep[1/1] [===22%                      ] prof_rank_1.nsys-rep[1/1] [===23%                      ] prof_rank_1.nsys-rep[1/1] [===24%                      ] prof_rank_1.nsys-rep[1/1] [====25%                     ] prof_rank_1.nsys-rep[1/1] [====26%                     ] prof_rank_1.nsys-rep[1/1] [====27%                     ] prof_rank_1.nsys-rep[1/1] [====28%                     ] prof_rank_1.nsys-rep[1/1] [=====29%                    ] prof_rank_1.nsys-rep[1/1] [=====30%                    ] prof_rank_1.nsys-rep[1/1] [=====31%                    ] prof_rank_1.nsys-rep[1/1] [=====32%                    ] prof_rank_1.nsys-r
+2: [1/1] [0%                          ] prof_rank_2.nsys-rep[1/1] [0%                          ] prof_rank_2.nsys-rep[1/1] [5%                          ] prof_rank_2.nsys-rep[1/1] [5%                          ] prof_rank_2.nsys-rep[1/1] [7%                          ] prof_rank_2.nsys-rep[1/1] [6%                          ] prof_rank_2.nsys-rep[1/1] [7%                          ] prof_rank_2.nsys-rep[1/1] [6%                          ] prof_rank_2.nsys-rep[1/1] [7%                          ] prof_rank_2.nsys-rep[1/1] [12%                         ] prof_rank_2.nsys-rep[1/1] [11%                         ] prof_rank_2.nsys-rep[1/1] [12%                         ] prof_rank_2.nsys-rep[1/1] [11%                         ] prof_rank_2.nsys-rep[1/1] [=15%                        ] prof_rank_2.nsys-rep[1/1] [==18%                       ] prof_rank_2.nsys-rep[1/1] [=17%                        ] prof_rank_2.nsys-rep[1/1] [==18%                       ] prof_rank_2.nsys-rep[1/1] [=17%                        ] 
+3: prof_rank_3.nsys-rep[1/1] [===22%                      ] prof_rank_3.nsys-rep[1/1] [===23%                      ] prof_rank_3.nsys-rep[1/1] [===22%                      ] prof_rank_3.nsys-rep[1/1] [===23%                      ] prof_rank_3.nsys-rep[1/1] [===22%                      ] prof_rank_3.nsys-rep[1/1] [==21%                       ] prof_rank_3.nsys-rep[1/1] [==20%                       ] prof_rank_3.nsys-rep[1/1] [==19%                       ] prof_rank_3.nsys-rep[1/1] [==18%                       ] prof_rank_3.nsys-rep[1/1] [=17%                        ] prof_rank_3.nsys-rep[1/1] [=16%                        ] prof_rank_3.nsys-rep[1/1] [=15%                        ] prof_rank_3.nsys-rep[1/1] [14%                         ] prof_rank_3.nsys-rep[1/1] [=15%                        ] prof_rank_3.nsys-rep[1/1] [=16%                        ] prof_rank_3.nsys-rep[1/1] [=17%                        ] prof_rank_3.nsys-rep[1/1] [==18%                       ] prof_rank_3.nsys-rep[1/1] [==19%     
+2: prof_rank_2.nsys-rep[1/1] [==21%                       ] prof_rank_2.nsys-rep[1/1] [==20%                       ] prof_rank_2.nsys-rep[1/1] [==19%                       ] prof_rank_2.nsys-rep[1/1] [===22%                      ] prof_rank_2.nsys-rep[1/1] [===23%                      ] prof_rank_2.nsys-rep[1/1] [===22%                      ] prof_rank_2.nsys-rep[1/1] [===23%                      ] prof_rank_2.nsys-rep[1/1] [===22%                      ] prof_rank_2.nsys-rep[1/1] [==21%                       ] prof_rank_2.nsys-rep[1/1] [==20%                       ] prof_rank_2.nsys-rep[1/1] [==19%                       ] prof_rank_2.nsys-rep[1/1] [==18%                       ] prof_rank_2.nsys-rep[1/1] [=17%                        ] prof_rank_2.nsys-rep[1/1] [=16%                        ] prof_rank_2.nsys-rep[1/1] [=15%                        ] prof_rank_2.nsys-rep[1/1] [14%                         ] prof_rank_2.nsys-rep[1/1] [=15%                        ] prof_rank_2.nsys-rep[1/1] [=16%      
+3:                   ] prof_rank_3.nsys-rep[1/1] [==20%                       ] prof_rank_3.nsys-rep[1/1] [==21%                       ] prof_rank_3.nsys-rep[1/1] [===22%                      ] prof_rank_3.nsys-rep[1/1] [===23%                      ] prof_rank_3.nsys-rep[1/1] [===24%                      ] prof_rank_3.nsys-rep[1/1] [====25%                     ] prof_rank_3.nsys-rep[1/1] [====26%                     ] prof_rank_3.nsys-rep[1/1] [====27%                     ] prof_rank_3.nsys-rep[1/1] [====28%                     ] prof_rank_3.nsys-rep[1/1] [=====29%                    ] prof_rank_3.nsys-rep[1/1] [=====30%                    ] prof_rank_3.nsys-rep[1/1] [=====31%                    ] prof_rank_3.nsys-rep[1/1] [=====32%                    ] prof_rank_3.nsys-rep[1/1] [======33%                   ] prof_rank_3.nsys-rep[1/1] [======34%                   ] prof_rank_3.nsys-rep[1/1] [======35%                   ] prof_rank_3.nsys-rep[1/1] [=======36%                  ] prof_rank_3.nsys-r
+2:                   ] prof_rank_2.nsys-rep[1/1] [=17%                        ] prof_rank_2.nsys-rep[1/1] [==18%                       ] prof_rank_2.nsys-rep[1/1] [==19%                       ] prof_rank_2.nsys-rep[1/1] [==20%                       ] prof_rank_2.nsys-rep[1/1] [==21%                       ] prof_rank_2.nsys-rep[1/1] [===22%                      ] prof_rank_2.nsys-rep[1/1] [===23%                      ] prof_rank_2.nsys-rep[1/1] [===24%                      ] prof_rank_2.nsys-rep[1/1] [====25%                     ] prof_rank_2.nsys-rep[1/1] [====26%                     ] prof_rank_2.nsys-rep[1/1] [====27%                     ] prof_rank_2.nsys-rep[1/1] [====28%                     ] prof_rank_2.nsys-rep[1/1] [=====29%                    ] prof_rank_2.nsys-rep[1/1] [=====30%                    ] prof_rank_2.nsys-rep[1/1] [=====31%                    ] prof_rank_2.nsys-rep[1/1] [=====32%                    ] prof_rank_2.nsys-rep[1/1] [======33%                   ] prof_rank_2.nsys-r
+1: ep[1/1] [======33%                   ] prof_rank_1.nsys-rep[1/1] [======34%                   ] prof_rank_1.nsys-rep[1/1] [======35%                   ] prof_rank_1.nsys-rep[1/1] [=======36%                  ] prof_rank_1.nsys-rep[1/1] [=======37%                  ] prof_rank_1.nsys-rep[1/1] [=======38%                  ] prof_rank_1.nsys-rep[1/1] [=======39%                  ] prof_rank_1.nsys-rep[1/1] [========40%                 ] prof_rank_1.nsys-rep[1/1] [========41%                 ] prof_rank_1.nsys-rep[1/1] [========42%                 ] prof_rank_1.nsys-rep[1/1] [=========43%                ] prof_rank_1.nsys-rep[1/1] [=========44%                ] prof_rank_1.nsys-rep[1/1] [=========45%                ] prof_rank_1.nsys-rep[1/1] [=========46%                ] prof_rank_1.nsys-rep[1/1] [==========47%               ] prof_rank_1.nsys-rep[1/1] [==========48%               ] prof_rank_1.nsys-rep[1/1] [==========49%               ] prof_rank_1.nsys-rep[1/1] [===========50%              
+3: ep[1/1] [=======37%                  ] prof_rank_3.nsys-rep[1/1] [=======38%                  ] prof_rank_3.nsys-rep[1/1] [=======39%                  ] prof_rank_3.nsys-rep[1/1] [========40%                 ] prof_rank_3.nsys-rep[1/1] [========41%                 ] prof_rank_3.nsys-rep[1/1] [========42%                 ] prof_rank_3.nsys-rep[1/1] [=========43%                ] prof_rank_3.nsys-rep[1/1] [=========44%                ] prof_rank_3.nsys-rep[1/1] [=========45%                ] prof_rank_3.nsys-rep[1/1] [=========46%                ] prof_rank_3.nsys-rep[1/1] [==========47%               ] prof_rank_3.nsys-rep[1/1] [==========48%               ] prof_rank_3.nsys-rep[1/1] [==========49%               ] prof_rank_3.nsys-rep[1/1] [===========50%              ] prof_rank_3.nsys-rep[1/1] [===========51%              ] prof_rank_3.nsys-rep[1/1] [===========52%              ] prof_rank_3.nsys-rep[1/1] [===========53%              ] prof_rank_3.nsys-rep[1/1] [============54%             
+2: ep[1/1] [======34%                   ] prof_rank_2.nsys-rep[1/1] [======35%                   ] prof_rank_2.nsys-rep[1/1] [=======36%                  ] prof_rank_2.nsys-rep[1/1] [=======37%                  ] prof_rank_2.nsys-rep[1/1] [=======38%                  ] prof_rank_2.nsys-rep[1/1] [=======39%                  ] prof_rank_2.nsys-rep[1/1] [========40%                 ] prof_rank_2.nsys-rep[1/1] [========41%                 ] prof_rank_2.nsys-rep[1/1] [========42%                 ] prof_rank_2.nsys-rep[1/1] [=========43%                ] prof_rank_2.nsys-rep[1/1] [=========44%                ] prof_rank_2.nsys-rep[1/1] [=========45%                ] prof_rank_2.nsys-rep[1/1] [=========46%                ] prof_rank_2.nsys-rep[1/1] [==========47%               ] prof_rank_2.nsys-rep[1/1] [==========48%               ] prof_rank_2.nsys-rep[1/1] [==========49%               ] prof_rank_2.nsys-rep[1/1] [===========50%              ] prof_rank_2.nsys-rep[1/1] [===========51%              
+1: ] prof_rank_1.nsys-rep[1/1] [===========51%              ] prof_rank_1.nsys-rep[1/1] [===========52%              ] prof_rank_1.nsys-rep[1/1] [===========53%              ] prof_rank_1.nsys-rep[1/1] [============54%             ] prof_rank_1.nsys-rep[1/1] [============55%             ] prof_rank_1.nsys-rep[1/1] [============56%             ] prof_rank_1.nsys-rep[1/1] [============57%             ] prof_rank_1.nsys-rep[1/1] [=============58%            ] prof_rank_1.nsys-rep[1/1] [=============59%            ] prof_rank_1.nsys-rep[1/1] [=============60%            ] prof_rank_1.nsys-rep[1/1] [==============61%           ] prof_rank_1.nsys-rep[1/1] [==============62%           ] prof_rank_1.nsys-rep[1/1] [========================100%] prof_rank_1.nsys-rep[1/1] [========================100%] prof_rank_1.nsys-rep
+1: Generated:
+1: 	/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/Megatron-LM/inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_1.nsys-rep
+1: 1 has dumped nsys data
+3: ] prof_rank_3.nsys-rep[1/1] [============55%             ] prof_rank_3.nsys-rep[1/1] [============56%             ] prof_rank_3.nsys-rep[1/1] [============57%             ] prof_rank_3.nsys-rep[1/1] [=============58%            ] prof_rank_3.nsys-rep[1/1] [=============59%            ] prof_rank_3.nsys-rep[1/1] [=============60%            ] prof_rank_3.nsys-rep[1/1] [==============61%           ] prof_rank_3.nsys-rep[1/1] [==============62%           ] prof_rank_3.nsys-rep[1/1] [========================100%] prof_rank_3.nsys-rep[1/1] [========================100%] prof_rank_3.nsys-rep
+3: Generated:
+3: 	/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/Megatron-LM/inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_3.nsys-rep
+3: 3 has dumped nsys data
+2: ] prof_rank_2.nsys-rep[1/1] [===========52%              ] prof_rank_2.nsys-rep[1/1] [===========53%              ] prof_rank_2.nsys-rep[1/1] [============54%             ] prof_rank_2.nsys-rep[1/1] [============55%             ] prof_rank_2.nsys-rep[1/1] [============56%             ] prof_rank_2.nsys-rep[1/1] [============57%             ] prof_rank_2.nsys-rep[1/1] [=============58%            ] prof_rank_2.nsys-rep[1/1] [=============59%            ] prof_rank_2.nsys-rep[1/1] [=============60%            ] prof_rank_2.nsys-rep[1/1] [==============61%           ] prof_rank_2.nsys-rep[1/1] [==============62%           ] prof_rank_2.nsys-rep[1/1] [========================100%] prof_rank_2.nsys-rep[1/1] [========================100%] prof_rank_2.nsys-rep
+2: Generated:
+2: 	/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/a2av/Megatron-LM/inference-bench/reasoning/experiments/20260903_084556_prof_nvls/traces/prof_rank_2.nsys-rep
+2: 2 has dumped nsys data

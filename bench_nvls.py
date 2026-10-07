@@ -37,9 +37,17 @@ NVLS_MAX_BLOCKS = 148
 class NVLSBencher:
     name = "nvls"
 
-    def __init__(self, cfg: Config, group):
+    def __init__(self, cfg: Config, group, out_dtype: torch.dtype = torch.bfloat16):
         self.cfg = cfg
         self.group = group
+        # Expert-output (reduce-scatter source) dtype. bf16 halves the combine bytes and
+        # is this bench's default; fp32 is what Megatron's fused-MoE unpermute actually
+        # produces, and in that case NVLSAllGatherVDispatcher.token_combine also pays a
+        # separate fp32->bf16 cast after the reduce. Both are reproduced, so with
+        # out_dtype=fp32 this bencher stands in for the real 'nvls' dispatcher when
+        # comparing against the dynamic kernels.
+        assert out_dtype in (torch.bfloat16, torch.float32)
+        self.out_dtype = out_dtype
         # Fixed block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block
         # count). Not a swept knob -- NVLS always uses NVLS_MAX_BLOCKS.
         self.num_sms = NVLS_MAX_BLOCKS
@@ -72,7 +80,7 @@ class NVLSBencher:
         # multimem_reduce_scatter_v sets reduce_f32=False, emitting
         # multimem.ld_reduce.add.acc::f32.v4.bf16x2 (bf16 operands, f32 accumulator); only
         # the data movement and the final stored result are bf16. self.out must match dtype.
-        self.rsv = buf("ep_rsv", [gmax, H], torch.bfloat16)
+        self.rsv = buf(f"ep_rsv_{8 * self.out_dtype.itemsize}", [gmax, H], self.out_dtype)
         self.meta = buf("ep_meta", [cfg.ep_size], torch.int32)
 
         # [valid_tokens, rank_token_offset, ep_max_tokens]; written in-place each step.
@@ -94,7 +102,7 @@ class NVLSBencher:
         # Persistent combine output (stable address for graph replay). Must match the
         # rsv buffer dtype -- multimem_reduce_scatter_v asserts output.dtype == input.dtype.
         self.out = torch.empty(self.local_tokens, self.cfg.hidden,
-                               dtype=torch.bfloat16, device=self.device)
+                               dtype=self.out_dtype, device=self.device)
 
     # -- timed / setup ops -----------------------------------------------------
     def metadata(self):
@@ -160,7 +168,7 @@ class NVLSBencher:
                         "gathered [valid,H] == full random tensor bit-exact (hidden+routing+probs)"))
             # rsv buffer is bf16: seed bf16 so the reference matches what's stored. The
             # multicast reduce sums w identical copies in fp32 (acc::f32) then rounds to bf16.
-            rsv_full = torch.randn(valid, H, generator=gen, device=dev).to(torch.bfloat16)  # identical on all ranks
+            rsv_full = torch.randn(valid, H, generator=gen, device=dev).to(self.out_dtype)  # identical on all ranks
             self.rsv["tensor"].view(gcap, H)[:valid] = rsv_full
             self.combine()
             torch.cuda.synchronize()
@@ -209,6 +217,12 @@ class NVLSBencher:
             per_rank_max_tokens=self.cfg.per_rank_cap,
             max_num_blocks=self.num_sms,  # fixed 148-block cap (NVLS_MAX_BLOCKS)
         )
+        if self.out_dtype == torch.float32:
+            # NVLSAllGatherVDispatcher.token_combine ends with `output.to(torch.bfloat16)`
+            # when the reduce-scatter buffer is fp32. That extra elementwise kernel is part
+            # of the strategy's cost (the dynamic kernels fold the cast into the
+            # reduce-load instead), so charge it here.
+            self.out_bf16 = self.out.to(torch.bfloat16)
 
     def combine(self):
         """RSV-V: sum expert outputs across EP ranks, scatter to local tokens."""
