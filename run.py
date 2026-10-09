@@ -27,7 +27,8 @@ import sys
 # path. On a single NVLink node the RDMA/scaleout Gin contexts are simply
 # dormant (allow_hybrid_mode=False -> num_scaleout_ranks==1). Set
 # EP_DISABLE_GIN=1 in the environment only as a deliberate experiment.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, REPO_DIR)
 
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
@@ -37,11 +38,30 @@ from common import (  # noqa: E402
 )
 
 
+IMPLS = ("deepep", "nvls", "nccl", "a2a")
+IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
+
+
+def parse_impls(spec: str) -> "list[str]":
+    """Comma-separated impl names and/or aliases -> ordered, de-duplicated impl list."""
+    impls = []
+    for name in spec.split(","):
+        name = name.strip()
+        for impl in IMPL_ALIASES.get(name, (name,)):
+            if impl not in IMPLS:
+                raise SystemExit(f"unknown --impl '{impl}' (choose from {IMPLS} or "
+                                 f"{tuple(IMPL_ALIASES)})")
+            if impl not in impls:
+                impls.append(impl)
+    return impls
+
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--impl", choices=["deepep", "nvls", "nccl", "both", "all"], default="all",
-                   help="which dispatcher(s): deepep | nvls | nccl | both (deepep+nvls) | "
-                        "all (deepep+nvls+nccl)")
+    p.add_argument("--impl", default="all",
+                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
+                        "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
+                        "e.g. --impl deepep,a2a")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="148",
@@ -54,7 +74,11 @@ def parse_args():
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--timing", choices=["graph", "eager"], default="graph")
     p.add_argument("--seed", type=int, default=1234)
-    p.add_argument("--out", default=None, help="CSV output path (rank 0)")
+    p.add_argument("--out", default=None,
+                   help="CSV output file (rank 0). A bare file name is placed under "
+                        "--results-dir; a path with a directory is used as given.")
+    p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
+                   help="directory for CSV outputs (created if missing)")
     p.add_argument("--validate", action="store_true",
                    help="run known-value correctness checks for each impl and exit "
                         "(no timing): confirms the isolated dispatch/combine actually "
@@ -79,12 +103,13 @@ def timed(fn, group, args):
 
 def main():
     args = parse_args()
+    impls = parse_impls(args.impl)
 
     # Import deep_ep BEFORE init_process_group. Importing it AFTER torch has
     # initialized its NCCL leaves DeepEP linked against a different NCCL than the
     # one backing the torch process group, and reading that comm handle in
     # _C.calculate_elastic_buffer_size segfaults during ElasticBuffer construction.
-    if args.impl in ("deepep", "both", "all"):
+    if "deepep" in impls:
         import deep_ep  # noqa: F401
 
     group, rank, world, local_rank = init_distributed()
@@ -107,20 +132,23 @@ def main():
         print(f"# EP={world} experts={cfg.num_experts} topk={cfg.topk} hidden={cfg.hidden} "
               f"per_rank_cap={cfg.per_rank_cap} timing={args.timing} reps={args.reps}",
               flush=True)
-        print(f"# impl={args.impl} num_layers={args.num_layers} device_sms={dev_sms} "
+        print(f"# impl={','.join(impls)} num_layers={args.num_layers} device_sms={dev_sms} "
               f"deepep_num_sms_sweep={deepep_sms}", flush=True)
 
     # Build benchers.
     benchers = []
-    if args.impl in ("deepep", "both", "all"):
+    if "deepep" in impls:
         from bench_deepep import DeepEPBencher
         benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
-    if args.impl in ("nvls", "both", "all"):
+    if "nvls" in impls:
         from bench_nvls import NVLSBencher
         benchers.append(NVLSBencher(cfg, group))
-    if args.impl in ("nccl", "all"):
+    if "nccl" in impls:
         from bench_nccl import NCCLBencher
         benchers.append(NCCLBencher(cfg, group))
+    if "a2a" in impls:
+        from bench_a2a import A2ABencher
+        benchers.append(A2ABencher(cfg, group))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
@@ -129,6 +157,12 @@ def main():
     for b in benchers:
         b.build()
     dist.barrier(group)
+    if rank == 0:
+        for b in benchers:
+            if b.name in ("nvls", "a2a"):
+                print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
+                      f"{b.num_blocks * world * 4} B of barrier slots; "
+                      f"signal pad = {b.signal_pad_bytes} B", flush=True)
 
     # --validate: run known-value correctness checks per impl and exit. Confirms the
     # isolated collectives actually move/reduce data correctly (gather row g == g;
@@ -230,12 +264,15 @@ def main():
         for name, B, sms, phase, counts, us, mode in rows:
             print(f"{name},{B},{sms},{phase},{us:.3f},{'graph' if mode else 'eager'}", flush=True)
         if args.out:
-            with open(args.out, "w") as f:
+            out_path = (args.out if os.path.dirname(args.out)
+                        else os.path.join(args.results_dir, args.out))
+            os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+            with open(out_path, "w") as f:
                 f.write("impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing\n")
                 for name, B, sms, phase, counts, us, mode in rows:
                     f.write(f"{name},{B},{sms},{phase},\"{counts}\",{us:.4f},"
                             f"{'graph' if mode else 'eager'}\n")
-            print(f"# wrote {args.out}", flush=True)
+            print(f"# wrote {out_path}", flush=True)
 
     for b in benchers:
         if hasattr(b, "destroy"):

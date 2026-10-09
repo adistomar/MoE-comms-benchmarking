@@ -12,10 +12,14 @@ Depends only on matplotlib + stdlib csv (no torch).
 
   python3 plot_results.py --csv results.csv --out results.png
   python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
+
+Bare file names are resolved against --results-dir (CSV input, default results/) and
+--plots-dir (PNG output, default plots/); paths with a directory are used as given.
 """
 
 import argparse
 import csv
+import os
 import statistics
 
 import matplotlib
@@ -23,9 +27,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.cm as cm  # noqa: E402
 
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
 IMPL_NAME = {"deepep": "DeepEP-v2 (A2A)", "nvls": "NVLS (AGv/RSv)",
-             "nccl": "NCCL (AllGather)"}
-IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green"}
+             "nccl": "NCCL (AllGather)", "a2a": "A2A-V (unicast push / pull)"}
+IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
+              "a2a": "tab:red"}
 
 
 def _subtitle(ep):
@@ -112,9 +119,16 @@ def main():
     p.add_argument("--x", choices=["B", "num_sms"], default="B")
     p.add_argument("--num-layers", type=int, default=88, help="for the title only")
     p.add_argument("--title", default=None)
+    p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
+                   help="where bare --csv names are read from")
+    p.add_argument("--plots-dir", default=os.path.join(REPO_DIR, "plots"),
+                   help="where bare --out names are written (created if missing)")
     args = p.parse_args()
+    csv_path = args.csv if os.path.dirname(args.csv) else os.path.join(args.results_dir, args.csv)
+    out_path = args.out if os.path.dirname(args.out) else os.path.join(args.plots_dir, args.out)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    rows, ep = load(args.csv)
+    rows, ep = load(csv_path)
     subtitle = _subtitle(ep)
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
@@ -134,8 +148,8 @@ def main():
     ax.legend(loc="best", fontsize=8, ncol=2)
     ax.set_title(args.title or default_title, fontsize=10)
     fig.tight_layout()
-    fig.savefig(args.out, dpi=150)
-    print(f"wrote {args.out}")
+    fig.savefig(out_path, dpi=150)
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":

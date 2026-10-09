@@ -16,6 +16,7 @@ time only the AGV per iteration.
 """
 
 import torch
+import torch.distributed._symmetric_memory as symm_mem
 
 from nvls.symmetric_memory import SymmetricMemoryManager
 from nvls.metadata import fused_metadata_update
@@ -32,6 +33,30 @@ from common import Config, size_mb
 # swept, so NVLS always runs at ~all SMs. This is independent of DeepEP's --deepep-num-sms
 # (no shared/parity knob) -- upstream Megatron capped it at 128; we raise it to 148.
 NVLS_MAX_BLOCKS = 148
+
+# The AGV/RSV kernels' barrier (torch_symm_triton/barrier.py) gives every CTA one uint32
+# signal slot per peer, at index block_id * world_size + rank, so each buffer's signal pad
+# needs num_blocks * world_size * 4 bytes. PyTorch's default pad (9216 B = 2304 slots in
+# torch >= 2.9) is sized for its own kernels (<= 32 blocks), so 148 blocks overflow it at
+# EP >= 16 -- silently, into the data buffer that follows the pad.
+_SIGNAL_SLOT_BYTES = 4
+_SIGNAL_PAD_ALIGN_BYTES = 128
+
+
+def ensure_signal_pad_size(num_blocks: int, world_size: int) -> int:
+    """Grow the symmetric-memory signal pad so the per-CTA barrier fits. Must run before
+    any symmetric buffer is allocated (the size applies to future allocations only).
+    Never shrinks the pad. Returns the pad size in bytes that allocations will use."""
+    required = num_blocks * world_size * _SIGNAL_SLOT_BYTES
+    if not hasattr(symm_mem, "set_signal_pad_size"):
+        raise RuntimeError(
+            f"NVLS barrier needs a {required}-byte signal pad ({num_blocks} blocks x "
+            f"{world_size} ranks), but this torch has no set_signal_pad_size (needs >= 2.10)."
+        )
+    if symm_mem.get_signal_pad_size() < required:
+        aligned = -(-required // _SIGNAL_PAD_ALIGN_BYTES) * _SIGNAL_PAD_ALIGN_BYTES
+        symm_mem.set_signal_pad_size(aligned)
+    return symm_mem.get_signal_pad_size()
 
 
 class NVLSBencher:
@@ -51,6 +76,10 @@ class NVLSBencher:
         cfg = self.cfg
         gmax = cfg.global_cap
         K, H = cfg.topk, cfg.hidden
+
+        # Same grid the AGV/RSV wrappers launch: min(per_rank_max_tokens, max_num_blocks).
+        self.num_blocks = min(cfg.per_rank_cap, self.num_sms)
+        self.signal_pad_bytes = ensure_signal_pad_size(self.num_blocks, cfg.ep_size)
 
         def buf(key, shape, dtype):
             b = SymmetricMemoryManager.get_buffer(

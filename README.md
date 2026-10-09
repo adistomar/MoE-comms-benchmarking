@@ -65,6 +65,14 @@ at 128; we **hardcode it to 148** (the B200 SM count we standardize on) in `nvls
 SMs) and never swept; it is **independent** of DeepEP's `--deepep-num-sms` — there is no
 shared knob, and sweeping DeepEP's SM count does not affect NVLS.
 
+**NVLS signal pad.** The AGV/RSV barrier gives every CTA one 4-byte signal slot per peer
+(`block_id * world_size + rank`), so each symmetric buffer's signal pad must hold
+`num_blocks * EP * 4` bytes. PyTorch's default pad (9216 B = 2304 slots, torch ≥ 2.9) only
+fits 148 blocks up to EP=8 and would overflow *silently* into the data buffer at EP ≥ 16.
+`bench_nvls.py` therefore calls `torch.distributed._symmetric_memory.set_signal_pad_size`
+(torch ≥ 2.10) with `min(per_rank_cap, 148) * EP * 4` bytes before allocating its buffers;
+`run.py` prints the resulting grid and pad size.
+
 ## Correctness check (`--validate`)
 
 `torchrun --nproc_per_node=4 run.py --impl all --validate` runs known-value checks per
@@ -79,10 +87,12 @@ across ranks (exit 0/1); tested at a full batch (`B=2·ep`) and the 0-token-rank
 
 ## Setup
 
-**Requirements.** A GPU node with a **single NVLink domain** (this was validated on
-4× B200 / GB200) and an NGC-style PyTorch container (validated: CUDA 13, torch 2.11,
-**Triton 3.6**, `torch.distributed._symmetric_memory` + multicast, NVRTC/ptxas). Multi-GPU
-launched with `torchrun`. NVLS needs Hopper+ (SM ≥ 9) with NVLink + symmetric memory.
+**Requirements.** GPUs in a **single NVLink domain** (one node, or several nodes of one
+NVL72 rack; validated on 4× B200 / GB200 and GB300 NVL72) and an NGC-style PyTorch container
+(validated: CUDA 13, torch 2.11/2.12, **Triton 3.6/3.7**, `torch.distributed._symmetric_memory`
++ multicast, NVRTC/ptxas). Multi-GPU launched with `torchrun` or one task per GPU
+(`launch_rank.sh`). NVLS needs Hopper+ (SM ≥ 9) with NVLink + symmetric memory, and torch ≥
+2.10 (for `set_signal_pad_size`).
 
 **1. Clone this repo and DeepEP side-by-side:**
 ```bash
@@ -93,7 +103,9 @@ cd DeepEP && git checkout af9a0403 && cd ..                   # v2 ElasticBuffer
 ```
 The DeepEP checkout must contain `deep_ep/buffers/elastic.py` (the v2 "elastic"
 dispatcher). `deepep_env.sh` looks for DeepEP at `../DeepEP` by default; override with
-`export DEEPEP_DIR=/path/to/DeepEP`.
+`export DEEPEP_DIR=/path/to/DeepEP`. Newer DeepEP (V2.5, `EPBuffer`) is not used: it builds
+through DeepJIT, which needs elfutils headers (`libdw-dev`) the container does not ship, and
+its EP dispatch/combine path is unchanged for this benchmark.
 
 **2. Get an interactive allocation in the container** (adjust account/partition/image):
 ```bash
@@ -105,13 +117,16 @@ srun -p batch --account=<ACCT> --qos=interactive -t 2:00:00 --nodes=1 --exclusiv
 **3. Set up the environment** (builds DeepEP on first run; NVLS/NCCL need nothing):
 ```bash
 cd moe-comms-bench
-source ./deepep_env.sh      # installs nvidia-nccl-cu13>=2.30.4 + nvshmem-cu13 wheels,
+source ./deepep_env.sh      # installs nvidia-nccl-cu13==2.30.4 + nvshmem-cu13 wheels,
                             # orders the new NCCL first, builds DeepEP (~15 min first
                             # time; cached after), sets a persistent JIT cache.
 ```
-The first build compiles DeepEP's `_C` extension into `$DEEPEP_DIR/deep_ep/` and caches
-JIT kernels under `bench/.deepep_jit_cache` — both persist, so re-running in a fresh
-(ephemeral) container just reinstalls the wheels and reuses the prebuilt extension.
+NCCL is pinned to 2.30.4 (the version `af9a0403` targets, and the one the mcore-inference
+container's torch ships); `>=2.30.4` would now resolve to 2.32.x. The first build compiles
+DeepEP's `_C` extension into `$DEEPEP_DIR/deep_ep/` and caches JIT kernels under
+`$EP_JIT_CACHE_DIR` (default `~/.cache/deepep_jit`, off Lustre) — both persist, so re-running
+in a fresh (ephemeral) container just reinstalls the wheels and reuses the prebuilt
+extension. Run the first build from a **single task** (multi-task jobs refuse to build).
 If DeepEP's runtime-vs-linked NCCL check complains, `export EP_SUPPRESS_NCCL_CHECK=1`.
 
 **4. Run:**
@@ -122,26 +137,31 @@ torchrun --nproc_per_node=4 run.py --impl all --validate
 # quick smoke
 torchrun --nproc_per_node=4 run.py --impl all --batch-sizes 4 --num-layers 88 --reps 3 --warmup 2
 
-# full batch-size sweep -> results.csv (all three impls; DeepEP num_sms defaults to 148)
+# full batch-size sweep -> results/results.csv (all three impls; DeepEP num_sms defaults to 148)
 torchrun --nproc_per_node=4 run.py --impl all \
     --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192 --num-layers 88 \
     --reps 20 --warmup 6 --timing graph --out results.csv
-python3 plot_results.py --csv results.csv --out results.png
+python3 plot_results.py --csv results.csv --out results.png          # -> plots/results.png
 
-# DeepEP num_sms sweep -> results_sms.csv (each num_sms JIT-compiles once; NVLS/NCCL are
-# num_sms-independent reference lines)
+# DeepEP num_sms sweep -> results/results_sms.csv (each num_sms JIT-compiles once;
+# NVLS/NCCL are num_sms-independent reference lines)
 torchrun --nproc_per_node=4 run.py --impl all \
     --batch-sizes 1,16,128 --deepep-num-sms 4,16,64,128 --num-layers 88 \
     --reps 10 --warmup 4 --timing graph --out results_sms.csv
 python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
 ```
 Or submit `run.sbatch` (edit the SBATCH headers / `CONTAINER_IMAGE` for your cluster,
-then `cd moe-comms-bench && sbatch run.sbatch`).
+then `sbatch run.sbatch` from the repo directory; multi-node: `sbatch -N 4 --segment=4
+run.sbatch`). For one-task-per-GPU launches without torchrun, `launch_rank.sh` sets
+`RANK`/`WORLD_SIZE`/`MASTER_ADDR` from Slurm and forwards its arguments to `run.py`.
+
+**Outputs.** CSVs are written to `results/` and plots to `plots/` (bare `--out`/`--csv`
+names are resolved there; override with `--results-dir` / `--plots-dir`, or pass a path).
 
 `run.py` flags: `--impl {deepep,nvls,nccl,both,all}` (both = deepep+nvls; all = +nccl),
 `--batch-sizes`, `--num-layers`, `--deepep-num-sms` (comma list, even, clamped to device
-SM count), `--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--validate`
-(correctness checks then exit — see above).
+SM count), `--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--results-dir`,
+`--validate` (correctness checks then exit — see above).
 
 ## Required patch (Triton 3.6): int64 pointer-widen
 The vendored NVLS multimem kernels (`nvls/torch_symm_triton/variable_collectives.py`,
@@ -159,7 +179,9 @@ on Triton versions that already type it i64. Without it the NVLS path will not c
 - `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds.
 - `deepep_env.sh` — DeepEP build+runtime env (idempotent; relocatable).
 - `install_deepep_ngc.sh` — one-shot DeepEP wheel install + build (called by `deepep_env.sh`).
+- `launch_rank.sh` — per-task launcher (one Slurm task per GPU = one EP rank).
 - `run.sbatch` — SLURM batch template.
+- `results/`, `plots/` — benchmark CSVs and plots (created on demand).
 
 ## Caveats
 - **Combine precision.** NVLS and DeepEP combine in **bf16**; NCCL combines in **fp32**.
