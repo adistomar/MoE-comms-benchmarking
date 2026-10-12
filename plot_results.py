@@ -30,9 +30,12 @@ import matplotlib.cm as cm  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
-             "nccl": "NCCL (AllGather)"}
+             "nccl": "NCCL (AllGather)", "dynamic-ag": "Dynamic, forced AGv/RSv",
+             "dynamic-a2a": "Dynamic, forced A2Av"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2a": "tab:red"}
+              "a2a": "tab:red", "dynamic-ag": "tab:orange", "dynamic-a2a": "tab:red"}
+# Forced dynamic modes are dashed over the standalone kernel they should match.
+IMPL_LINESTYLE = {"dynamic-ag": "--", "dynamic-a2a": "--"}
 
 
 def _subtitle(ep):
@@ -96,7 +99,8 @@ def plot_vs_B(rows, ax):
         pts = sorted((r["B"], r["ms"]) for r in rows if r["impl"] == impl)
         xs, ys = [x for x, _ in pts], [y for _, y in pts]
         color = IMPL_COLOR.get(impl, "gray")
-        ax.plot(xs, ys, marker="o", lw=2, ms=6, color=color, label=IMPL_NAME.get(impl, impl))
+        ax.plot(xs, ys, marker="o", lw=2, ms=6, color=color, ls=IMPL_LINESTYLE.get(impl, "-"),
+                label=IMPL_NAME.get(impl, impl))
         ends.append((xs[-1], ys[-1], color))
     allB = sorted({r["B"] for r in rows})
     ax.set_xscale("log", base=2)

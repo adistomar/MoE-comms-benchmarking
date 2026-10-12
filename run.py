@@ -39,7 +39,7 @@ from common import (  # noqa: E402
 )
 
 
-IMPLS = ("deepep", "nvls", "nccl", "a2a")
+IMPLS = ("deepep", "nvls", "nccl", "a2a", "dynamic")
 IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
 
 
@@ -60,9 +60,12 @@ def parse_impls(spec: str) -> "list[str]":
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--impl", default="all",
-                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
-                        "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
+                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a | dynamic, or "
+                        "the aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
                         "e.g. --impl deepep,a2a")
+    p.add_argument("--dynamic-threshold", default="ag,a2a",
+                   help="comma-separated A2A thresholds to sweep for the dynamic impl: 'ag' pins "
+                        "AG/RS, 'a2a' pins A2A, an integer T switches to A2A at global B >= T")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default=None,
@@ -149,6 +152,10 @@ def main():
     if "a2a" in impls:
         from bench_a2a import A2ABencher
         benchers.append(A2ABencher(cfg, group))
+    if "dynamic" in impls:
+        from bench_dynamic import DynamicBencher, parse_thresholds
+        dynamic_thresholds = parse_thresholds(args.dynamic_threshold)
+        benchers.append(DynamicBencher(cfg, group, dynamic_thresholds[0][1]))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
@@ -159,7 +166,7 @@ def main():
     dist.barrier(group)
     if rank == 0:
         for b in benchers:
-            if b.name in ("nvls", "a2a"):
+            if b.name in ("nvls", "a2a", "dynamic"):
                 print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
                       f"{b.num_blocks * world * 4} B of barrier slots; "
                       f"signal pad = {b.signal_pad_bytes} B", flush=True)
@@ -176,6 +183,8 @@ def main():
                 if rank == 0 or not ok:
                     print(f"  [rank{rank}] [{'PASS' if ok else 'FAIL'}] {name}  {detail}",
                           flush=True)
+            if rank == 0 and hasattr(b, "kernel_stats"):
+                print(f"# {b.name} kernels: {b.kernel_stats()}", flush=True)
 
         # Cross-implementation equivalence (>=2 impls built): feed the SAME random
         # tokens + routing to every impl, run a full functional dispatch -> identity
@@ -234,12 +243,20 @@ def main():
     rows = []  # (impl, B, num_sms, phase, counts, latency_us, timing_mode)
     nl = args.num_layers
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS and A2A-V run once at their block cap (b.num_sms, see
-        # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
-        sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
-        for sms in sms_list:
-            if b.name == "deepep":
-                b.set_num_sms(sms)
+        # Variants = (row name, num_sms, configure). DeepEP sweeps num_sms; the dynamic impl sweeps
+        # its A2A threshold (rows dynamic-ag / dynamic-a2a / dynamic-t<T>). NVLS, A2A-V and the
+        # dynamic impl run at their block cap (b.num_sms, see default_num_blocks). NCCL picks its
+        # own grid (b.num_sms=-1 = N/A).
+        if b.name == "deepep":
+            variants = [(b.name, sms, lambda sms=sms: b.set_num_sms(sms)) for sms in deepep_sms]
+        elif b.name == "dynamic":
+            variants = [(f"dynamic-{label}", b.num_sms, lambda t=t: b.set_a2a_threshold(t))
+                        for label, t in dynamic_thresholds]
+        else:
+            variants = [(b.name, b.num_sms, None)]
+        for row_name, sms, configure in variants:
+            if configure is not None:
+                configure()
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
                 b.setup_batch(hidden, topk_idx, topk_weights)
@@ -250,14 +267,16 @@ def main():
                 # CUDA graph. Recording all nl layers in the graph is what models the
                 # layer dimension; the metadata is included once (per step), not per layer.
                 (_, step_us), mode = timed(lambda: b.decode_step(nl), group, args)
-                rows.append((b.name, B, sms, "decode_step", counts, step_us, mode))
+                rows.append((row_name, B, sms, "decode_step", counts, step_us, mode))
 
                 if rank == 0:
                     smstr = f" sms={sms:3d}" if sms >= 0 else " sms= na"
-                    print(f"  {b.name:7s} B={B:4d}{smstr} counts={counts} "
+                    print(f"  {row_name:11s} B={B:4d}{smstr} counts={counts} "
                           f"decode_step({nl}L)={step_us:9.2f}us "
                           f"(per-layer={step_us / nl:6.2f}us)  "
                           f"[{'graph' if mode else 'eager'}]", flush=True)
+        if rank == 0 and hasattr(b, "kernel_stats"):
+            print(f"# {b.name} kernels: {b.kernel_stats()}", flush=True)
 
     if rank == 0:
         print("\n# impl,global_B,num_sms,phase,latency_us,timing", flush=True)

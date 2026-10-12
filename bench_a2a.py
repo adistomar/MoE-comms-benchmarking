@@ -56,12 +56,13 @@ class A2ABencher:
                 raise RuntimeError(f"A2A symmetric-memory init failed for '{key}'.")
             return b
 
-        # Own buffers (not NVLS's ep_* keys), so both benchers can run in one process.
-        self.recv_h = buf("a2a_recv_h", [gmax, H], torch.bfloat16)
-        self.recv_r = buf("a2a_recv_r", [gmax, K], torch.int64)
-        self.recv_p = buf("a2a_recv_p", [gmax, K], torch.float32)
-        self.partial = buf("a2a_partial", [gmax, H], torch.bfloat16)
-        self.meta = buf("a2a_meta", [cfg.ep_size], torch.int32)
+        # Own buffers, keyed by bencher name (not NVLS's ep_* keys), so the NVLS, A2A and dynamic
+        # benchers can run in one process.
+        self.recv_h = buf(f"{self.name}_recv_h", [gmax, H], torch.bfloat16)
+        self.recv_r = buf(f"{self.name}_recv_r", [gmax, K], torch.int64)
+        self.recv_p = buf(f"{self.name}_recv_p", [gmax, K], torch.float32)
+        self.partial = buf(f"{self.name}_partial", [gmax, H], torch.bfloat16)
+        self.meta = buf(f"{self.name}_meta", [cfg.ep_size], torch.int32)
 
         # [valid_tokens, rank_token_offset, ep_max_tokens]; written in-place each step.
         self.step_metadata = torch.zeros(3, dtype=torch.int32, device=self.device)
