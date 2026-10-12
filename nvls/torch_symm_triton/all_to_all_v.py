@@ -57,7 +57,7 @@ except ImportError:
 
 from .barrier import symm_mem_sync
 from .multimem_asm import ld_64, ld_128, st_64, st_128
-from .utils import is_device_nvls_capable, sync_threads
+from .utils import device_num_sms, is_device_nvls_capable, sync_threads
 
 _MAX_BLOCK_SIZE = 1024
 _WARP_SIZE = 32
@@ -446,7 +446,7 @@ def a2a_dispatch_v(
     routing_bits, routing_packs = _row_params(input_routing)
     probs_bits, probs_packs = _row_params(input_probs)
 
-    max_num_blocks = kwargs.get("max_num_blocks", 148)
+    max_num_blocks = kwargs.get("max_num_blocks", device_num_sms(input_hidden.device))
     block_size = min(
         max(triton.next_power_of_2(p) for p in (hidden_packs, routing_packs, probs_packs)),
         _MAX_BLOCK_SIZE,
@@ -518,7 +518,7 @@ def a2a_combine_v(
     bits, hidden_packs = _row_params(output)
     assert bits == 128, "hidden rows must be 16-byte aligned"
 
-    max_num_blocks = kwargs.get("max_num_blocks", 148)
+    max_num_blocks = kwargs.get("max_num_blocks", device_num_sms(output.device))
     block_size = min(triton.next_power_of_2(hidden_packs), _MAX_BLOCK_SIZE)
     num_warps = max(1, block_size // _WARP_SIZE)
     num_blocks = min(per_rank_max_tokens, max_num_blocks)

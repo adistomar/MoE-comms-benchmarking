@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026. MoE dispatch/combine decode benchmark driver.
 """
-Benchmark three MoE dispatch/combine schemes in a single-node decode setting:
+Benchmark MoE dispatch/combine schemes in a decode setting within one NVLink domain:
   - DeepEP-v2   (A2A over NCCL-Gin),
   - Megatron-NVLS (AllGather-V/ReduceScatter-V via NVLink multicast),
-  - Megatron-NCCL (dense AllGather/ReduceScatter, CUDA-graph path, padded to equal counts).
+  - Megatron-NCCL (dense AllGather/ReduceScatter, CUDA-graph path, padded to equal counts),
+  - A2A-V       (unicast dispatch / pull combine over symmetric memory).
 
-Launch (single GB200 node, 4x B200):
-    torchrun --nproc_per_node=4 bench/run.py --impl all \
-        --batch-sizes 1,2,4,8,16,32,64,128 --deepep-num-sms 148 --reps 100
+Launch (one node, 4 GPUs):
+    torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a \
+        --batch-sizes 1,2,4,8,16,32,64,128 --reps 100
 
 B is the GLOBAL decode-token count across all EP ranks (B=1 => one token total).
 Times ONE full decode step = `--num-layers` MoE layers of paired dispatch->combine
@@ -64,10 +65,9 @@ def parse_args():
                         "e.g. --impl deepep,a2a")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
-    p.add_argument("--deepep-num-sms", default="148",
+    p.add_argument("--deepep-num-sms", default=None,
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
-                        "clamped to the device SM count; default 148 = B200 SM count, "
-                        "matching NVLS's fixed block cap)")
+                        "clamped to the device SM count; default: the device SM count)")
     p.add_argument("--num-layers", type=int, default=88,
                    help="MoE layers replayed per decode step (Nemotron-Super = 88)")
     p.add_argument("--reps", type=int, default=100)
@@ -121,11 +121,11 @@ def main():
     )
     device = torch.device("cuda", local_rank)
 
-    # DeepEP num_sms sweep: even values, clamped to the device SM count; the device
-    # max is always included so the sweep reaches "all SMs". (NVLS has no SM knob.)
+    # DeepEP num_sms sweep: even values, clamped to the device SM count; defaults to the
+    # device SM count. (NVLS / A2A-V use a CTA cap instead, see default_num_blocks.)
     dev_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     _even = lambda n: max(2, min(int(n), dev_sms) - (min(int(n), dev_sms) % 2))
-    deepep_sms = sorted({_even(s) for s in args.deepep_num_sms.split(",")})
+    deepep_sms = sorted({_even(s) for s in (args.deepep_num_sms or str(dev_sms)).split(",")})
 
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
@@ -234,8 +234,8 @@ def main():
     rows = []  # (impl, B, num_sms, phase, counts, latency_us, timing_mode)
     nl = args.num_layers
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS runs once at its fixed block cap (b.num_sms=148,
-        # its NVLS analog of num_sms). NCCL picks its own grid (b.num_sms=-1 = N/A).
+        # DeepEP sweeps num_sms. NVLS and A2A-V run once at their block cap (b.num_sms, see
+        # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
         sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
         for sms in sms_list:
             if b.name == "deepep":

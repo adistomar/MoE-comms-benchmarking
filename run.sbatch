@@ -69,7 +69,7 @@ srun --ntasks="$(( NNODES * 4 ))" --ntasks-per-node=4 --cpus-per-task=36 \
         export DEEPEP_DIR='$DEEPEP_DIR' MASTER_ADDR='${MASTER_ADDR}' MASTER_PORT='${MASTER_PORT}'
         bash launch_rank.sh --impl ${IMPL} \
             --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576 \
-            --deepep-num-sms 148 --num-layers 88 \
+            --num-layers 88 \
             --reps 20 --warmup 6 --timing graph \
             --out ${OUT}.csv
         if [ \"\${SLURM_PROCID}\" = \"0\" ]; then

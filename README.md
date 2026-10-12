@@ -50,18 +50,18 @@ step / num_layers.
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
 
-## Experimental setup (Nemotron-Super, 1 node, 4× B200)
+## Experimental setup (Nemotron-Super, GB300 NVL72, 4 GPUs/node)
 
 | | value |
 |---|---|
 | experts / top-k / hidden | 512 / 22 / 1024 |
-| parallelism | EP=4 (1 rank/GPU), TP=1, single NVLink domain |
+| parallelism | EP=4–64 (1 rank/GPU, 1–16 nodes of one NVL72 rack), TP=1, single NVLink domain |
 | dtype | dispatch **bf16** (all four); combine **bf16** for NVLS, DeepEP & A2A-V (all accumulate the sum in fp32: NVLS via `acc::f32`, A2A-V in registers), **fp32** for NCCL |
-| batch axis | **GLOBAL** B ∈ {1,…,8192} tokens across all 4 ranks (balanced; B<4 leaves some ranks with 0 tokens; NCCL pads to the per-step max) |
+| batch axis | **GLOBAL** B ∈ {1,…,1M} tokens across all EP ranks (balanced; B<EP leaves some ranks with 0 tokens; NCCL pads to the per-step max) |
 | layers | 88 MoE layers per decode step (`--num-layers`) |
 | routing | uniform: 22 distinct experts/token; identical tensors fed to all impls |
 | no host sync | DeepEP `do_cpu_sync=False`; NVLS / A2A-V on-device metadata; NCCL pad-count all-reduce done in setup (outside the graph) |
-| comm SMs / blocks | DeepEP `num_sms` swept; **NVLS and A2A-V fixed at 148** CTA blocks (see below); NCCL uses NCCL-internal grid |
+| comm SMs / blocks | DeepEP `num_sms` = device SM count (152 on GB300) unless swept; **NVLS and A2A-V**: CTA cap = 4× SM count at EP ≤ 8, SM count at EP ≥ 16 (see below); NCCL uses NCCL-internal grid |
 
 DeepEP flags: `use_fp8_dispatch=False` (bf16), `allow_hybrid_mode=False` (single
 NVLink domain → flat/direct path, Gin dormant not disabled), `allow_multiple_reduction=True`
@@ -69,20 +69,48 @@ NVLink domain → flat/direct path, Gin dormant not disabled), `allow_multiple_r
 deferred to the GEMM, matching NVLS), `num_sms` swept.
 
 **NVLS / A2A-V block cap.** The NVLS AGV/RSV kernels and the A2A-V kernels run **one CTA
-per token**, so the CTA-grid ceiling `max_num_blocks` bounds how many tokens are in flight.
-Upstream Megatron caps it at 128; we **hardcode it to 148** (the B200 SM count we standardize
-on) in `nvls/torch_symm_triton/variable_collectives.py`, and `bench_a2a.py` passes the same
-148 to the A2A-V wrappers. It is **independent** of DeepEP's `--deepep-num-sms` — there is no
-shared knob, and sweeping DeepEP's SM count does not affect NVLS or A2A-V.
+per token**, so the CTA-grid ceiling `max_num_blocks` bounds how many tokens are in flight
+(the grid is `min(per_rank_cap, max_num_blocks)`; CTAs past the step's `ep_max_tokens` exit
+at once). Upstream Megatron hardcodes 128. Here the wrappers in
+`nvls/torch_symm_triton/variable_collectives.py` and `all_to_all_v.py` default to the
+**device SM count** (`multi_processor_count`: 152 on GB300, 148 on B200), and the benchers
+override it per EP via `default_num_blocks` in `bench_nvls.py`:
+
+| EP | CTA cap (GB300) |
+|---|---|
+| ≤ 8 | 4 × SMs = 608 |
+| ≥ 16 | SMs = 152 |
+
+*Why more CTAs at small EP.* Each CTA has one token's rows in flight, so the bytes in flight
+per GPU are roughly `num_blocks × (distinct ranks a token reaches) × row size` (2 KB for
+hidden=1024 bf16). With top-22 of 512 experts a token reaches ≈4 ranks at EP=4, ≈7.6 at
+EP=8, ≈12 at EP=16 and ≈16–19 at EP=32/64. At EP ≤ 8, one CTA per SM therefore has too
+little data in flight to cover NVLink latency, and large batches are latency-bound. A CTA
+sweep on GB300 (per-layer dispatch+combine, B=128K) showed:
+
+| | 148 CTAs (~1/SM) | 592–1184 CTAs (4–8/SM) |
+|---|---|---|
+| A2A-V, EP=4 | 1.62 ms | 0.73 ms |
+| A2A-V, EP=8 | 0.94 ms | 0.78 ms |
+| A2A-V, EP=16 | 0.70 ms | 0.68 ms |
+| NVLS AGV/RSV, EP=4 | 1.12 ms | 0.85 ms |
+
+At EP ≤ 8, 4 CTAs/SM was never slower than 1/SM at any swept batch size. At EP=16, one CTA
+per SM already keeps the link busy, and extra CTAs only add barrier traffic
+(`num_blocks × EP` signals): 4 CTAs/SM was 5–10% *slower* at B=4K–16K. At small B the cap
+does not matter (CTAs beyond the step's token count exit immediately). DeepEP has no equivalent knob: it launches one
+persistent CTA per SM (`num_sms`) and loops over tokens inside the kernel, with one warp per
+token and TMA copies, so its concurrency comes from warps rather than from the grid. Its
+`num_sms` is independent of this cap (sweeping it does not affect NVLS or A2A-V).
 
 **Signal pad.** The AGV/RSV and A2A-V barrier gives every CTA one 4-byte signal slot per
 peer (`block_id * world_size + rank`), so each symmetric buffer's signal pad must hold
-`num_blocks * EP * 4` bytes. PyTorch's default pad (9216 B = 2304 slots, torch ≥ 2.9) only
-fits 148 blocks up to EP=8 and would overflow *silently* into the data buffer at EP ≥ 16.
-`bench_nvls.py` and `bench_a2a.py` therefore call
+`num_blocks * EP * 4` bytes. PyTorch's default pad (9216 B = 2304 slots, torch ≥ 2.9)
+overflows *silently* into the data buffer once `num_blocks * EP > 2304` (152 blocks at
+EP ≥ 16, 608 blocks already at EP=4). `bench_nvls.py` and `bench_a2a.py` therefore call
 `torch.distributed._symmetric_memory.set_signal_pad_size` (torch ≥ 2.10) with
-`min(per_rank_cap, 148) * EP * 4` bytes before allocating their buffers; `run.py` prints the
-resulting grid and pad size.
+`min(per_rank_cap, num_blocks) * EP * 4` bytes before allocating their buffers; `run.py`
+prints the resulting grid and pad size.
 
 ## A2A-V design
 
@@ -198,7 +226,7 @@ torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a --validate
 torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a --batch-sizes 4 --num-layers 88 \
     --reps 3 --warmup 2
 
-# full batch-size sweep -> results/results.csv (DeepEP num_sms defaults to 148)
+# full batch-size sweep -> results/results.csv (DeepEP num_sms defaults to the device SM count)
 torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a \
     --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192 --num-layers 88 \
     --reps 20 --warmup 6 --timing graph --out results.csv
@@ -239,7 +267,7 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 - `run.py` — torchrun driver (times one full decode step as a CUDA graph).
 - `common.py` — config, global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing).
 - `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` — the four benchers; each exposes `decode_step(num_layers)` + `validate()` + `functional_roundtrip()`.
-- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the 128→148 block cap, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
+- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
 - `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds.
 - `deepep_env.sh` — DeepEP build+runtime env (idempotent; relocatable).
 - `install_deepep_ngc.sh` — one-shot DeepEP wheel install + build (called by `deepep_env.sh`).
@@ -260,12 +288,10 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
   are padded to the per-step max (`ceil(B/ep)`). Under the balanced global-B split counts
   differ by ≤1, so padding is negligible; the padded rows are gathered/reduced then
   truncated (they never pollute real-token outputs).
-- **A2A-V at small EP.** With one CTA per token, the data in flight is roughly
-  `num_blocks × (distinct destination ranks per token) × row size`. At small EP each token
-  reaches few ranks (≈4 at EP=4 vs ≈12 at EP=16 with top-22 of 512), so the default 148 CTAs
-  cannot keep NVLink busy and A2A-V is latency-bound at large batch sizes (on GB300 at EP=4,
-  B=128K: ~1.6 ms/layer at 148 CTAs vs ~0.73 ms/layer with 4–8 CTAs per SM). The wrappers
-  take `max_num_blocks`; the benchmark keeps the 148 default for parity with NVLS.
+- **CTA cap is a static per-EP choice.** The cap (4× SMs at EP ≤ 8, SMs at EP ≥ 16) comes
+  from the B=256–128K sweep above at EP=4/8/16; EP=32/64 follow the EP=16 rule untested.
+  Under CUDA graphs the grid is frozen at capture, so a per-batch-size choice would need an
+  on-device active-CTA count rather than a different launch grid.
 - **A2A-V routing/probs multicast.** Every rank receives every token's 264-byte routing +
   probs row (`B × 264` bytes per layer), independent of EP. Hidden-row traffic shrinks as EP
   grows, so this becomes a larger share of dispatch traffic at large EP (~14% of incoming

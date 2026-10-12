@@ -34,7 +34,7 @@ except ImportError:
 
 from .barrier import symm_mem_sync
 from .multimem_asm import ld_64, ld_128, st_64, st_128
-from .utils import is_device_nvls_capable, sync_threads
+from .utils import device_num_sms, is_device_nvls_capable, sync_threads
 
 
 @triton.jit
@@ -326,11 +326,10 @@ def multimem_reduce_scatter_v(
         f"{row_bytes} bytes is not 16-byte aligned; RSV requires 128-bit alignment."
     )
 
-    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
-    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
-    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
-    # fixes NVLS at 148 (see bench/README.md).
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    # Defaults to the device SM count (upstream Megatron hardcodes 128). One CTA processes
+    # one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds how many
+    # tokens are in flight. Callers may override via max_num_blocks (see README).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", device_num_sms(output_tensor.device))
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 
@@ -611,11 +610,10 @@ def multimem_all_gather_v(
     )
     bits = 128 if row_bytes % 16 == 0 else 64
 
-    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
-    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
-    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
-    # fixes NVLS at 148 (see bench/README.md).
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    # Defaults to the device SM count (upstream Megatron hardcodes 128). One CTA processes
+    # one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds how many
+    # tokens are in flight. Callers may override via max_num_blocks (see README).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", device_num_sms(input_tensor.device))
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 
@@ -738,11 +736,10 @@ def multimem_all_gatherv_3tensor(
         symm_mem_hdl_0.world_size == symm_mem_hdl_1.world_size == symm_mem_hdl_2.world_size
     ), "All three symmetric memory handles must belong to the same EP group (world_size mismatch)."
 
-    # Hardcoded to 148 (B200 SM count; raised from upstream Megatron's 128). One CTA
-    # processes one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds
-    # how many SMs the comm occupies. Callers may override via max_num_blocks; the bencher
-    # fixes NVLS at 148 (see bench/README.md).
-    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", 148)
+    # Defaults to the device SM count (upstream Megatron hardcodes 128). One CTA processes
+    # one token, so num_blocks = min(per_rank_max_tokens, MAX_NUM_BLOCKS) bounds how many
+    # tokens are in flight. Callers may override via max_num_blocks (see README).
+    MAX_NUM_BLOCKS = kwargs.get("max_num_blocks", device_num_sms(input_tensor_0.device))
     MAX_BLOCK_SIZE = 1024
     WARP_SIZE = 32
 

@@ -21,7 +21,7 @@ from nvls.symmetric_memory import SymmetricMemoryManager
 from nvls.metadata import fused_metadata_update
 from nvls.torch_symm_triton.all_to_all_v import a2a_combine_v, a2a_dispatch_v
 
-from bench_nvls import NVLS_MAX_BLOCKS, ensure_signal_pad_size
+from bench_nvls import default_num_blocks, ensure_signal_pad_size
 from common import Config, size_mb
 
 
@@ -31,9 +31,10 @@ class A2ABencher:
     def __init__(self, cfg: Config, group):
         self.cfg = cfg
         self.group = group
-        # Same fixed CTA cap as NVLS (one CTA per token); not swept.
-        self.num_sms = NVLS_MAX_BLOCKS
         self.device = torch.device("cuda", cfg.local_rank)
+        # Same CTA cap as NVLS (one CTA per token): 4x the SM count at EP <= 8, else the SM
+        # count (see default_num_blocks in bench_nvls.py).
+        self.num_sms = default_num_blocks(self.device, cfg.ep_size)
         self._built = False
 
     # -- one-time allocation (collective) --------------------------------------
