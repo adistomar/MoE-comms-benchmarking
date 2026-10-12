@@ -15,16 +15,22 @@ TAG="$1"
 BATCHES="$2"
 DEEPEP_SMS="$3"
 BLOCKS="$4"
-IMPL_TIMEOUT="${IMPL_TIMEOUT:-480}"   # seconds per impl
+IMPL_TIMEOUT="${IMPL_TIMEOUT:-480}"   # seconds per impl attempt
+IMPLS="${IMPLS:-deepep nvls a2a}"     # space-separated subset to run
 
 port="${MASTER_PORT_BASE:-29510}"
-for impl in deepep nvls a2a; do
-    port=$((port + 1))
-    MASTER_PORT=$port timeout --kill-after=15 "$IMPL_TIMEOUT" bash launch_rank.sh \
-        --impl "$impl" --batch-sizes "$BATCHES" --deepep-num-sms "$DEEPEP_SMS" \
-        --nvls-blocks "$BLOCKS" --a2a-blocks "$BLOCKS" --num-layers 88 --reps 10 --warmup 3 \
-        --timing graph --out "${TAG}_${impl}.csv"
-    rc=$?
-    [ "$rc" -ne 0 ] && echo "[sweep_blocks] rank ${SLURM_PROCID}: impl=$impl exited rc=$rc"
+for impl in $IMPLS; do
+    # One retry on timeout (rc 124): multi-node runs have occasionally hung in startup
+    # (rank 0 never publishes its NCCL id); a fresh process on a new port has recovered.
+    for attempt in 1 2; do
+        port=$((port + 1))
+        MASTER_PORT=$port timeout --kill-after=15 "$IMPL_TIMEOUT" bash launch_rank.sh \
+            --impl "$impl" --batch-sizes "$BATCHES" --deepep-num-sms "$DEEPEP_SMS" \
+            --nvls-blocks "$BLOCKS" --a2a-blocks "$BLOCKS" --num-layers 88 --reps 10 \
+            --warmup 3 --timing graph --out "${TAG}_${impl}.csv"
+        rc=$?
+        [ "$rc" -ne 0 ] && echo "[sweep_blocks] rank ${SLURM_PROCID}: impl=$impl attempt=$attempt rc=$rc"
+        [ "$rc" -ne 124 ] && break
+    done
 done
 exit 0
