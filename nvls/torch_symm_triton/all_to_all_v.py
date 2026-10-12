@@ -21,8 +21,6 @@ Combine
   * Pull: each source rank reads, for each of its local tokens t, row rank_token_offset + t of
     the bf16 partial-output buffer on each of t's destination ranks (recomputed from its own
     routing), sums the partials in fp32 in a fixed per-token order, and stores bf16 locally.
-  * Leading per-CTA-pair barrier with release/acquire semantics (plain peer loads, unlike
-    multimem.ld_reduce), so every destination's partials are visible before any read.
 
 Destinations are enumerated by walking the token's top-k entries with a "sent" bitmask, so the
 work scales with top-k rather than the EP size (WORLD_SIZE <= 64). Peer stores and loads are
@@ -304,15 +302,13 @@ def _a2a_combine_v_kernel(
     if pid >= ep_max_tokens:
         return
 
-    # Every destination's partials (written by earlier kernels) must be visible before any pull:
-    # release on the signal side, acquire on the wait side (these are plain peer loads).
     symm_mem_sync(
         signal_pad_ptrs,
         None,
         RANK,
         WORLD_SIZE,
-        hasPreviousMemAccess=True,
-        hasSubsequentMemAccess=True,
+        hasPreviousMemAccess=False,
+        hasSubsequentMemAccess=False,
     )
     sync_threads()
 
