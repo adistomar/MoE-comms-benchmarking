@@ -12,7 +12,10 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 DEEPEP_DIR="${DEEPEP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/DeepEP}"
 MIN_NCCL_VERSION="${MIN_NCCL_VERSION:-23004}"
 
-NCCL_PACKAGE="${NCCL_PACKAGE:-nvidia-nccl-cu13>=2.30.4}"
+# Pinned (was >=2.30.4): the pinned DeepEP commit (af9a0403) targets the NCCL 2.30 device
+# API and touches NCCL-internal Gin structs, and pip would now resolve >=2.30.4 to 2.32.x.
+# 2.30.4 is also the NCCL the mcore-inference container's torch ships.
+NCCL_PACKAGE="${NCCL_PACKAGE:-nvidia-nccl-cu13==2.30.4}"
 NVSHMEM_PACKAGE="${NVSHMEM_PACKAGE:-nvidia-nvshmem-cu13}"
 
 resolve_nvidia_root() {

@@ -12,3 +12,6 @@ __pycache__/
 # SLURM logs
 *.out
 slurm-*.out
+
+# nsys profiles
+profiles/

@@ -16,15 +16,17 @@
 # containers we skip the ~15-min recompile and just reinstall the runtime
 # NCCL/NVSHMEM wheels, recreate the unversioned .so symlinks, and set PYTHONPATH.
 #
-# CUDA-13 container, NCCL >= 2.30.4 (Gin / device symmetric-memory API). Gin is
-# left ENABLED (it is the v2 transport; scaleout contexts are dormant on 1 node).
+# CUDA-13 container, NCCL 2.30.4 (Gin / device symmetric-memory API; pinned, see
+# install_deepep_ngc.sh). Gin is left ENABLED (it is the v2 transport; scaleout
+# contexts are dormant on 1 node).
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DEEPEP_DIR="${DEEPEP_DIR:-$(cd "$BENCH_DIR/.." 2>/dev/null && pwd)/DeepEP}"
 
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-10.0}"      # sm_100 (B200); 9.0 for H100
-export EP_JIT_CACHE_DIR="${EP_JIT_CACHE_DIR:-$BENCH_DIR/.deepep_jit_cache}"
-export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$BENCH_DIR/.pip_cache}"
+# Keep caches off Lustre (cluster policy): JIT kernels persist in $HOME, pip is ephemeral.
+export EP_JIT_CACHE_DIR="${EP_JIT_CACHE_DIR:-$HOME/.cache/deepep_jit}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${TMPDIR:-/tmp}/pip_cache}"
 mkdir -p "$EP_JIT_CACHE_DIR" "$PIP_CACHE_DIR"
 export EP_NCCL_ROOT_DIR="${EP_NCCL_ROOT_DIR:-/usr/local/lib/python3.12/dist-packages/nvidia/nccl}"
 export EP_NVSHMEM_ROOT_DIR="${EP_NVSHMEM_ROOT_DIR:-/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem}"
@@ -42,7 +44,7 @@ elif ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
     # Single-node (sourced once) takes the lock immediately, so this is a no-op there.
     (
         flock 9
-        python3 -m pip install -q --no-deps 'nvidia-nccl-cu13>=2.30.4' nvidia-nvshmem-cu13 >/dev/null 2>&1 || true
+        python3 -m pip install -q --no-deps 'nvidia-nccl-cu13==2.30.4' nvidia-nvshmem-cu13 >/dev/null 2>&1 || true
         for pair in "$EP_NCCL_ROOT_DIR/lib:libnccl.so" "$EP_NVSHMEM_ROOT_DIR/lib:libnvshmem_host.so"; do
             d="${pair%:*}"; n="${pair##*:}"
             if [ ! -e "$d/$n" ]; then
@@ -52,6 +54,11 @@ elif ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
         done
     ) 9>"${TMPDIR:-/tmp}/deepep_env_install.lock"
     export PYTHONPATH="$DEEPEP_DIR:${PYTHONPATH:-}"
+elif [ "${SLURM_NTASKS:-1}" -gt 1 ]; then
+    # Never build from every rank of a multi-task job (shared checkout on Lustre).
+    echo "[deepep_env] ERROR: no DeepEP build at $DEEPEP_DIR inside a ${SLURM_NTASKS}-task job." \
+         "Run 'bash install_deepep_ngc.sh' from a single task first." >&2
+    return 1 2>/dev/null || exit 1
 else
     echo "[deepep_env] no prebuilt extension found; building DeepEP from $DEEPEP_DIR"
     DEEPEP_DIR="$DEEPEP_DIR" bash "$BENCH_DIR/install_deepep_ngc.sh"
