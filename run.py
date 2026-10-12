@@ -67,7 +67,13 @@ def parse_args():
     p.add_argument("--deepep-num-sms", default="148",
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
                         "clamped to the device SM count; default 148 = B200 SM count, "
-                        "matching NVLS's fixed block cap)")
+                        "matching NVLS's default block cap)")
+    p.add_argument("--nvls-blocks", default="148",
+                   help="comma-separated CTA (grid) caps to sweep for NVLS AGV-V/RSV-V; values "
+                        "above the SM count put several CTAs on each SM (default 148)")
+    p.add_argument("--a2a-blocks", default="148",
+                   help="comma-separated CTA (grid) counts to sweep for A2A-V; values above "
+                        "the SM count put several CTAs on each SM (default 148 = NVLS's cap)")
     p.add_argument("--num-layers", type=int, default=88,
                    help="MoE layers replayed per decode step (Nemotron-Super = 88)")
     p.add_argument("--reps", type=int, default=100)
@@ -126,6 +132,9 @@ def main():
     dev_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     _even = lambda n: max(2, min(int(n), dev_sms) - (min(int(n), dev_sms) % 2))
     deepep_sms = sorted({_even(s) for s in args.deepep_num_sms.split(",")})
+    # NVLS / A2A-V grid sweeps: no clamp (not a cooperative launch; several CTAs may share an SM).
+    nvls_blocks = sorted({int(s) for s in args.nvls_blocks.split(",")})
+    a2a_blocks = sorted({int(s) for s in args.a2a_blocks.split(",")})
 
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
@@ -133,7 +142,8 @@ def main():
               f"per_rank_cap={cfg.per_rank_cap} timing={args.timing} reps={args.reps}",
               flush=True)
         print(f"# impl={','.join(impls)} num_layers={args.num_layers} device_sms={dev_sms} "
-              f"deepep_num_sms_sweep={deepep_sms}", flush=True)
+              f"deepep_num_sms_sweep={deepep_sms} nvls_blocks_sweep={nvls_blocks} "
+              f"a2a_blocks_sweep={a2a_blocks}", flush=True)
 
     # Build benchers.
     benchers = []
@@ -142,13 +152,13 @@ def main():
         benchers.append(DeepEPBencher(cfg, group, deepep_sms[0]))
     if "nvls" in impls:
         from bench_nvls import NVLSBencher
-        benchers.append(NVLSBencher(cfg, group))
+        benchers.append(NVLSBencher(cfg, group, nvls_blocks))
     if "nccl" in impls:
         from bench_nccl import NCCLBencher
         benchers.append(NCCLBencher(cfg, group))
     if "a2a" in impls:
         from bench_a2a import A2ABencher
-        benchers.append(A2ABencher(cfg, group))
+        benchers.append(A2ABencher(cfg, group, a2a_blocks))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
@@ -234,11 +244,11 @@ def main():
     rows = []  # (impl, B, num_sms, phase, counts, latency_us, timing_mode)
     nl = args.num_layers
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS runs once at its fixed block cap (b.num_sms=148,
-        # its NVLS analog of num_sms). NCCL picks its own grid (b.num_sms=-1 = N/A).
-        sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
-        for sms in sms_list:
-            if b.name == "deepep":
+        # DeepEP sweeps num_sms; NVLS and A2A-V sweep their CTA caps (recorded in the num_sms
+        # column). NCCL picks its own grid (b.num_sms=-1 = N/A).
+        sweeps = {"deepep": deepep_sms, "nvls": nvls_blocks, "a2a": a2a_blocks}
+        for sms in sweeps.get(b.name, [b.num_sms]):
+            if b.name in sweeps:
                 b.set_num_sms(sms)
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
@@ -249,7 +259,10 @@ def main():
                 # combine (NVLS: + one metadata), captured & replayed as a single
                 # CUDA graph. Recording all nl layers in the graph is what models the
                 # layer dimension; the metadata is included once (per step), not per layer.
+                # NVTX range per config so an nsys trace can split kernels by (impl, sms, B).
+                torch.cuda.nvtx.range_push(f"{b.name} sms={sms} B={B}")
                 (_, step_us), mode = timed(lambda: b.decode_step(nl), group, args)
+                torch.cuda.nvtx.range_pop()
                 rows.append((b.name, B, sms, "decode_step", counts, step_us, mode))
 
                 if rank == 0:

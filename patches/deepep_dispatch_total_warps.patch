@@ -1,0 +1,17 @@
+--- a/csrc/kernels/elastic/dispatch.hpp
++++ b/csrc/kernels/elastic/dispatch.hpp
+@@ -258,10 +258,13 @@
+     // Maximize shared memory utilization
+     if (num_scaleout_ranks == 1) {
+         // Too many warps may cause performance degrade, so we limit the total warps into 512
++        // (benchmark knob: `EP_DISPATCH_TOTAL_WARPS` overrides the 512)
+         const auto token_layout = get_dispatch_token_layout(hidden, elem_size, num_sf_packs, num_topk);
++        const int num_total_dispatch_warps = get_env<int>("EP_DISPATCH_TOTAL_WARPS", 512);
++        EP_HOST_ASSERT(num_total_dispatch_warps > 0);
+         num_dispatch_warps = std::min<int>(std::min<int>(
+             (num_smem_bytes - num_notify_smem_bytes) / token_layout.get_num_bytes<true>(), 32 - num_notify_warps),
+-            math::ceil_div(512, num_sms));
++            math::ceil_div(num_total_dispatch_warps, num_sms));
+         num_threads = (num_notify_warps + num_dispatch_warps) * 32;
+     } else {
+         // Hybrid kernels

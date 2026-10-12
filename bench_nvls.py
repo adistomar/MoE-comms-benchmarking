@@ -27,11 +27,11 @@ from nvls.torch_symm_triton.variable_collectives import (
 
 from common import Config, size_mb
 
-# Fixed CTA-block cap for the NVLS AGV/RSV comm kernels. They run one CTA per token, so
-# this grid ceiling (the multimem `max_num_blocks`) bounds how many SMs the comm occupies.
-# HARDCODED to 148 (the B200 SM count we standardize on; the device reports 152) and NOT
-# swept, so NVLS always runs at ~all SMs. This is independent of DeepEP's --deepep-num-sms
-# (no shared/parity knob) -- upstream Megatron capped it at 128; we raise it to 148.
+# Default CTA-block cap for the NVLS AGV/RSV comm kernels. They run one CTA per token, so
+# this grid ceiling (the multimem `max_num_blocks`) sets how many tokens are in flight.
+# 148 = the B200 SM count we standardize on (the device reports 152); upstream Megatron caps
+# it at 128. run.py --nvls-blocks sweeps it (values above the SM count put several CTAs on
+# each SM); it is independent of DeepEP's --deepep-num-sms.
 NVLS_MAX_BLOCKS = 148
 
 # The AGV/RSV kernels' barrier (torch_symm_triton/barrier.py) gives every CTA one uint32
@@ -62,14 +62,20 @@ def ensure_signal_pad_size(num_blocks: int, world_size: int) -> int:
 class NVLSBencher:
     name = "nvls"
 
-    def __init__(self, cfg: Config, group):
+    def __init__(self, cfg: Config, group, num_blocks_sweep=(NVLS_MAX_BLOCKS,)):
         self.cfg = cfg
         self.group = group
-        # Fixed block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block
-        # count). Not a swept knob -- NVLS always uses NVLS_MAX_BLOCKS.
-        self.num_sms = NVLS_MAX_BLOCKS
+        # Block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block count).
+        # Defaults to NVLS_MAX_BLOCKS; run.py --nvls-blocks sweeps it via set_num_sms().
+        self.max_blocks = max(num_blocks_sweep)
+        self.num_sms = num_blocks_sweep[0]
         self.device = torch.device("cuda", cfg.local_rank)
         self._built = False
+
+    def set_num_sms(self, num_blocks: int):
+        """Change the block cap. The signal pad is sized in build() for the largest swept value."""
+        assert num_blocks <= self.max_blocks, (num_blocks, self.max_blocks)
+        self.num_sms = num_blocks
 
     # -- one-time allocation (collective) --------------------------------------
     def build(self):
@@ -77,8 +83,8 @@ class NVLSBencher:
         gmax = cfg.global_cap
         K, H = cfg.topk, cfg.hidden
 
-        # Same grid the AGV/RSV wrappers launch: min(per_rank_max_tokens, max_num_blocks).
-        self.num_blocks = min(cfg.per_rank_cap, self.num_sms)
+        # Largest grid the AGV/RSV wrappers launch: min(per_rank_max_tokens, max_num_blocks).
+        self.num_blocks = min(cfg.per_rank_cap, self.max_blocks)
         self.signal_pad_bytes = ensure_signal_pad_size(self.num_blocks, cfg.ep_size)
 
         def buf(key, shape, dtype):
@@ -236,7 +242,7 @@ class NVLSBencher:
             rank_token_offset=self.step_metadata[1:2],
             ep_max_tokens=self.step_metadata[2:3],
             per_rank_max_tokens=self.cfg.per_rank_cap,
-            max_num_blocks=self.num_sms,  # fixed 148-block cap (NVLS_MAX_BLOCKS)
+            max_num_blocks=self.num_sms,  # NVLS_MAX_BLOCKS unless swept
         )
 
     def combine(self):
@@ -248,5 +254,5 @@ class NVLSBencher:
             rank_token_offset=self.step_metadata[1:2],
             ep_max_tokens=self.step_metadata[2:3],
             per_rank_max_tokens=self.cfg.per_rank_cap,
-            max_num_blocks=self.num_sms,  # fixed 148-block cap (NVLS_MAX_BLOCKS)
+            max_num_blocks=self.num_sms,  # NVLS_MAX_BLOCKS unless swept
         )

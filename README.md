@@ -60,18 +60,19 @@ NVLink domain → flat/direct path, Gin dormant not disabled), `allow_multiple_r
 deferred to the GEMM, matching NVLS), `num_sms` swept.
 
 **NVLS block cap.** The NVLS AGV/RSV kernels run **one CTA per token**, so the CTA-grid
-ceiling `max_num_blocks` bounds how many SMs the comm can occupy. Upstream Megatron caps it
-at 128; we **hardcode it to 148** (the B200 SM count we standardize on) in `nvls/torch_symm_triton/variable_collectives.py`. NVLS is **fixed at 148** (≈ all
-SMs) and never swept; it is **independent** of DeepEP's `--deepep-num-sms` — there is no
-shared knob, and sweeping DeepEP's SM count does not affect NVLS.
+ceiling `max_num_blocks` sets how many tokens are in flight. Upstream Megatron caps it
+at 128; we default it to **148** (the B200 SM count we standardize on) in `nvls/torch_symm_triton/variable_collectives.py`. `--nvls-blocks` (and
+`--a2a-blocks` for A2A-V) sweeps it; values above the SM count put several CTAs on each SM.
+It is **independent** of DeepEP's `--deepep-num-sms` — there is no shared knob.
 
 **NVLS signal pad.** The AGV/RSV barrier gives every CTA one 4-byte signal slot per peer
 (`block_id * world_size + rank`), so each symmetric buffer's signal pad must hold
 `num_blocks * EP * 4` bytes. PyTorch's default pad (9216 B = 2304 slots, torch ≥ 2.9) only
 fits 148 blocks up to EP=8 and would overflow *silently* into the data buffer at EP ≥ 16.
 `bench_nvls.py` therefore calls `torch.distributed._symmetric_memory.set_signal_pad_size`
-(torch ≥ 2.10) with `min(per_rank_cap, 148) * EP * 4` bytes before allocating its buffers;
-`run.py` prints the resulting grid and pad size.
+(torch ≥ 2.10) with `min(per_rank_cap, max_blocks) * EP * 4` bytes before allocating its
+buffers (`max_blocks` = the largest swept block cap; `bench_a2a.py` does the same); `run.py`
+prints the resulting grid and pad size.
 
 ## Correctness check (`--validate`)
 
@@ -149,6 +150,22 @@ torchrun --nproc_per_node=4 run.py --impl all \
     --batch-sizes 1,16,128 --deepep-num-sms 4,16,64,128 --num-layers 88 \
     --reps 10 --warmup 4 --timing graph --out results_sms.csv
 python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
+
+# Block-count sweep of all three impls (one task per GPU; one run.py process per impl):
+#   args = tag, global B list, DeepEP num_sms list, NVLS/A2A blocks list
+bash sweep_blocks.sh blocks_ep4 256,4096,16384,131072 16,32,64,96,128,148,152 \
+    16,32,64,128,148,296,592,1184
+#   -> results/blocks_ep4_{deepep,nvls,a2a}.csv
+python3 plot_block_scaling.py \
+    --csv blocks_ep4_deepep.csv,blocks_ep4_nvls.csv,blocks_ep4_a2a.csv   # -> plots/block-size-scaling/
+# (sweep_ctas_nsys.sh is the same sweep with rank 0 under nsys for a per-kernel split; nsys
+#  has hung rank 0 on long multi-config runs, so prefer sweep_blocks.sh for timing.)
+
+# DeepEP dispatch-warp sweep (fairness check for DeepEP's own concurrency knob): build a
+# patched copy once from a single task, then sweep EP_DISPATCH_TOTAL_WARPS (upstream: 512)
+bash build_deepep_variant.sh patches/deepep_dispatch_total_warps.patch ../DeepEP-warps
+DEEPEP_DIR=../DeepEP-warps bash sweep_deepep_warps.sh deepwarps_ep4 \
+    256,4096,16384,131072 32,64,148 256,512,1024,2048,4096   # -> results/deepwarps_ep4_w*.csv
 ```
 Or submit `run.sbatch` (edit the SBATCH headers / `CONTAINER_IMAGE` for your cluster,
 then `sbatch run.sbatch` from the repo directory; multi-node: `sbatch -N 4 --segment=4
@@ -158,10 +175,12 @@ run.sbatch`). For one-task-per-GPU launches without torchrun, `launch_rank.sh` s
 **Outputs.** CSVs are written to `results/` and plots to `plots/` (bare `--out`/`--csv`
 names are resolved there; override with `--results-dir` / `--plots-dir`, or pass a path).
 
-`run.py` flags: `--impl {deepep,nvls,nccl,both,all}` (both = deepep+nvls; all = +nccl),
-`--batch-sizes`, `--num-layers`, `--deepep-num-sms` (comma list, even, clamped to device
-SM count), `--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--results-dir`,
-`--validate` (correctness checks then exit — see above).
+`run.py` flags: `--impl` (comma list of `deepep,nvls,nccl,a2a`, or `both` = deepep+nvls,
+`all` = +nccl), `--batch-sizes`, `--num-layers`, `--deepep-num-sms` (comma list, even,
+clamped to device SM count), `--nvls-blocks` / `--a2a-blocks` (comma lists of CTA caps),
+`--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--results-dir`, `--validate`
+(correctness checks then exit — see above). Each timed config runs inside an NVTX range
+`"<impl> sms=<n> B=<B>"` so an nsys trace can be split per config.
 
 ## Required patch (Triton 3.6): int64 pointer-widen
 The vendored NVLS multimem kernels (`nvls/torch_symm_triton/variable_collectives.py`,
@@ -176,7 +195,15 @@ on Triton versions that already type it i64. Without it the NVLS path will not c
 - `common.py` — config, global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing).
 - `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` — the three benchers; each exposes `decode_step(num_layers)` + `validate()` + `functional_roundtrip()`.
 - `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the 128→148 block cap, and import isolation).
+- `bench_a2a.py` — A2A-V bencher (`nvls/torch_symm_triton/all_to_all_v.py`: unicast dispatch, pull combine).
 - `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds.
+- `sweep_blocks.sh` — block-count sweep of NVLS / DeepEP / A2A-V (one process per impl, no profiler).
+- `sweep_ctas_nsys.sh` — the same sweep with rank 0 under nsys (per-kernel split).
+- `build_deepep_variant.sh`, `patches/` — build a patched DeepEP copy (e.g. `EP_DISPATCH_TOTAL_WARPS`).
+- `sweep_deepep_warps.sh` — DeepEP dispatch-warp sweep against such a build.
+- `analyze_nsys_sweep.py` — per-config kernel medians from a sweep's nsys SQLite export.
+- `plot_block_scaling.py` — latency vs block count, one figure per B → `plots/block-size-scaling/`.
+- `profile_nsys.sh` — nsys kernel summaries per batch size (rank 0).
 - `deepep_env.sh` — DeepEP build+runtime env (idempotent; relocatable).
 - `install_deepep_ngc.sh` — one-shot DeepEP wheel install + build (called by `deepep_env.sh`).
 - `launch_rank.sh` — per-task launcher (one Slurm task per GPU = one EP rank).

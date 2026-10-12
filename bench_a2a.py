@@ -28,13 +28,20 @@ from common import Config, size_mb
 class A2ABencher:
     name = "a2a"
 
-    def __init__(self, cfg: Config, group):
+    def __init__(self, cfg: Config, group, num_blocks_sweep=(NVLS_MAX_BLOCKS,)):
         self.cfg = cfg
         self.group = group
-        # Same fixed CTA cap as NVLS (one CTA per token); not swept.
-        self.num_sms = NVLS_MAX_BLOCKS
+        # CTA cap passed as max_num_blocks (one CTA per token, grid-stride). Defaults to the
+        # NVLS cap; run.py --a2a-blocks sweeps it via set_num_sms().
+        self.max_blocks = max(num_blocks_sweep)
+        self.num_sms = num_blocks_sweep[0]
         self.device = torch.device("cuda", cfg.local_rank)
         self._built = False
+
+    def set_num_sms(self, num_blocks: int):
+        """Change the CTA cap. The signal pad is sized in build() for the largest swept value."""
+        assert num_blocks <= self.max_blocks, (num_blocks, self.max_blocks)
+        self.num_sms = num_blocks
 
     # -- one-time allocation (collective) --------------------------------------
     def build(self):
@@ -42,9 +49,9 @@ class A2ABencher:
         gmax = cfg.global_cap
         K, H = cfg.topk, cfg.hidden
 
-        # Same grid the dispatch/combine wrappers launch; the barrier needs num_blocks * EP
+        # Largest grid the dispatch/combine wrappers launch; the barrier needs num_blocks * EP
         # signal slots, so size the pad before any symmetric allocation.
-        self.num_blocks = min(cfg.per_rank_cap, self.num_sms)
+        self.num_blocks = min(cfg.per_rank_cap, self.max_blocks)
         self.signal_pad_bytes = ensure_signal_pad_size(self.num_blocks, cfg.ep_size)
 
         def buf(key, shape, dtype):

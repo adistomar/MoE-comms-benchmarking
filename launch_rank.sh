@@ -37,4 +37,5 @@ done
 case ",$impl," in
     *,deepep,*|*,both,*|*,all,*) source ./deepep_env.sh || exit 1 ;;
 esac
-python3 run.py "$@"
+# exec so signals (e.g. from `timeout`) reach python directly.
+exec python3 run.py "$@"
