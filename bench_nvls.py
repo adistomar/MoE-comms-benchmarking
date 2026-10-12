@@ -16,9 +16,11 @@ time only the AGV per iteration.
 """
 
 import torch
+import torch.distributed._symmetric_memory as symm_mem
 
 from nvls.symmetric_memory import SymmetricMemoryManager
 from nvls.metadata import fused_metadata_update
+from nvls.torch_symm_triton.utils import device_num_sms
 from nvls.torch_symm_triton.variable_collectives import (
     multimem_all_gatherv_3tensor,
     multimem_reduce_scatter_v,
@@ -26,12 +28,45 @@ from nvls.torch_symm_triton.variable_collectives import (
 
 from common import Config, size_mb
 
-# Fixed CTA-block cap for the NVLS AGV/RSV comm kernels. They run one CTA per token, so
-# this grid ceiling (the multimem `max_num_blocks`) bounds how many SMs the comm occupies.
-# HARDCODED to 148 (the B200 SM count we standardize on; the device reports 152) and NOT
-# swept, so NVLS always runs at ~all SMs. This is independent of DeepEP's --deepep-num-sms
-# (no shared/parity knob) -- upstream Megatron capped it at 128; we raise it to 148.
-NVLS_MAX_BLOCKS = 148
+# CTA-block cap (the multimem `max_num_blocks`) for the one-token-per-CTA kernels: NVLS
+# AGV/RSV here and A2A-V in bench_a2a.py. Data in flight per GPU is roughly
+# num_blocks x (ranks each token reaches) x row size, and at small EP a token reaches few
+# ranks (~4 at EP=4), so one CTA per SM leaves NVLink underused; SMALL_EP_CTAS_PER_SM CTAs
+# per SM fill it. From EP=16 on, one CTA per SM already saturates the link and extra CTAs
+# only add barrier traffic. Independent of DeepEP's --deepep-num-sms.
+SMALL_EP_MAX = 8
+SMALL_EP_CTAS_PER_SM = 4
+
+
+def default_num_blocks(device: torch.device, ep_size: int) -> int:
+    """CTA cap for NVLS AGV/RSV and A2A-V: 4x the SM count at EP <= 8, else the SM count."""
+    ctas_per_sm = SMALL_EP_CTAS_PER_SM if ep_size <= SMALL_EP_MAX else 1
+    return ctas_per_sm * device_num_sms(device)
+
+
+# The AGV/RSV kernels' barrier (torch_symm_triton/barrier.py) gives every CTA one uint32
+# signal slot per peer, at index block_id * world_size + rank, so each buffer's signal pad
+# needs num_blocks * world_size * 4 bytes. PyTorch's default pad (9216 B = 2304 slots in
+# torch >= 2.9) is sized for its own kernels (<= 32 blocks), so ~150 blocks overflow it at
+# EP >= 16 -- silently, into the data buffer that follows the pad.
+_SIGNAL_SLOT_BYTES = 4
+_SIGNAL_PAD_ALIGN_BYTES = 128
+
+
+def ensure_signal_pad_size(num_blocks: int, world_size: int) -> int:
+    """Grow the symmetric-memory signal pad so the per-CTA barrier fits. Must run before
+    any symmetric buffer is allocated (the size applies to future allocations only).
+    Never shrinks the pad. Returns the pad size in bytes that allocations will use."""
+    required = num_blocks * world_size * _SIGNAL_SLOT_BYTES
+    if not hasattr(symm_mem, "set_signal_pad_size"):
+        raise RuntimeError(
+            f"NVLS barrier needs a {required}-byte signal pad ({num_blocks} blocks x "
+            f"{world_size} ranks), but this torch has no set_signal_pad_size (needs >= 2.10)."
+        )
+    if symm_mem.get_signal_pad_size() < required:
+        aligned = -(-required // _SIGNAL_PAD_ALIGN_BYTES) * _SIGNAL_PAD_ALIGN_BYTES
+        symm_mem.set_signal_pad_size(aligned)
+    return symm_mem.get_signal_pad_size()
 
 
 class NVLSBencher:
@@ -40,10 +75,9 @@ class NVLSBencher:
     def __init__(self, cfg: Config, group):
         self.cfg = cfg
         self.group = group
-        # Fixed block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block
-        # count). Not a swept knob -- NVLS always uses NVLS_MAX_BLOCKS.
-        self.num_sms = NVLS_MAX_BLOCKS
         self.device = torch.device("cuda", cfg.local_rank)
+        # Block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block count).
+        self.num_sms = default_num_blocks(self.device, cfg.ep_size)
         self._built = False
 
     # -- one-time allocation (collective) --------------------------------------
@@ -51,6 +85,10 @@ class NVLSBencher:
         cfg = self.cfg
         gmax = cfg.global_cap
         K, H = cfg.topk, cfg.hidden
+
+        # Same grid the AGV/RSV wrappers launch: min(per_rank_max_tokens, max_num_blocks).
+        self.num_blocks = min(cfg.per_rank_cap, self.num_sms)
+        self.signal_pad_bytes = ensure_signal_pad_size(self.num_blocks, cfg.ep_size)
 
         def buf(key, shape, dtype):
             b = SymmetricMemoryManager.get_buffer(
@@ -207,7 +245,7 @@ class NVLSBencher:
             rank_token_offset=self.step_metadata[1:2],
             ep_max_tokens=self.step_metadata[2:3],
             per_rank_max_tokens=self.cfg.per_rank_cap,
-            max_num_blocks=self.num_sms,  # fixed 148-block cap (NVLS_MAX_BLOCKS)
+            max_num_blocks=self.num_sms,  # default_num_blocks(device, EP)
         )
 
     def combine(self):
@@ -219,5 +257,5 @@ class NVLSBencher:
             rank_token_offset=self.step_metadata[1:2],
             ep_max_tokens=self.step_metadata[2:3],
             per_rank_max_tokens=self.cfg.per_rank_cap,
-            max_num_blocks=self.num_sms,  # fixed 148-block cap (NVLS_MAX_BLOCKS)
+            max_num_blocks=self.num_sms,  # default_num_blocks(device, EP)
         )

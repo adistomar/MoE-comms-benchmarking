@@ -23,6 +23,12 @@ def is_device_nvls_capable(device: torch.device) -> bool:
     return device.type == "cuda" and torch.cuda.get_device_properties(device).major >= 9
 
 
+def device_num_sms(device: torch.device) -> int:
+    """Number of SMs on `device` (e.g. 148 on B200, 152 on GB300); the default CTA cap of
+    the one-token-per-CTA collectives."""
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
 def are_tensors_nvls_eligible(*tensors: torch.Tensor) -> bool:
     """Check if tensors are eligible for NVLS (multicast) collectives.
 

@@ -12,10 +12,14 @@ Depends only on matplotlib + stdlib csv (no torch).
 
   python3 plot_results.py --csv results.csv --out results.png
   python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
+
+Bare file names are resolved against --results-dir (CSV input, default results/) and
+--plots-dir (PNG output, default plots/); paths with a directory are used as given.
 """
 
 import argparse
 import csv
+import os
 import statistics
 
 import matplotlib
@@ -23,9 +27,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.cm as cm  # noqa: E402
 
-IMPL_NAME = {"deepep": "DeepEP-v2 (A2A)", "nvls": "NVLS (AGv/RSv)",
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
              "nccl": "NCCL (AllGather)"}
-IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green"}
+IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
+              "a2a": "tab:red"}
 
 
 def _subtitle(ep):
@@ -33,9 +40,9 @@ def _subtitle(ep):
     length in load()), so the plot reflects the actual run rather than a hardcoded config."""
     if not ep:
         return "512 experts · top-k=22 · hidden=1024 · bf16 · CUDA-graph timing"
-    nodes = max(1, ep // 4)  # 4 B200 GPUs per node
+    nodes = max(1, ep // 4)  # 4 GB300 GPUs per node
     node_str = "1 node" if nodes == 1 else f"{nodes} nodes"
-    return (f"EP={ep} · {node_str} (4×B200/node) · 512 experts · top-k=22 · "
+    return (f"EP={ep} · {node_str} (4×B300/node) · 512 experts · top-k=22 · "
             f"hidden=1024 · bf16 · CUDA-graph timing")
 
 
@@ -66,19 +73,41 @@ def _ktick(v):
     return str(v)
 
 
+def _label_ends(ax, ends, min_gap_pt=10):
+    """Label each line's last value to its right, nudged apart vertically so close values
+    (e.g. all impls at B=1M) do not overlap. ends = [(x, y, color)]."""
+    fig = ax.figure
+    fig.canvas.draw()  # finalize limits/transforms before measuring
+    px_to_pt = 72.0 / fig.dpi
+    ys_pt = sorted((ax.transData.transform((x, y))[1] * px_to_pt, x, y, c) for x, y, c in ends)
+    placed = []
+    for y_pt, x, y, c in ys_pt:
+        target = y_pt if not placed else max(y_pt, placed[-1] + min_gap_pt)
+        placed.append(target)
+        ax.annotate(f"{y:.2f}", (x, y), textcoords="offset points",
+                    xytext=(6, target - y_pt), va="center", fontsize=8, color=c)
+
+
 def plot_vs_B(rows, ax):
-    for impl in sorted({r["impl"] for r in rows}):
+    impls = {r["impl"] for r in rows}
+    ends = []
+    # Legend order follows IMPL_NAME (DeepEP first); unknown impls go last.
+    for impl in [i for i in IMPL_NAME if i in impls] + sorted(impls - IMPL_NAME.keys()):
         pts = sorted((r["B"], r["ms"]) for r in rows if r["impl"] == impl)
         xs, ys = [x for x, _ in pts], [y for _, y in pts]
-        ax.plot(xs, ys, marker="o", lw=2, ms=6, color=IMPL_COLOR.get(impl, "gray"),
-                label=IMPL_NAME.get(impl, impl))
-        ax.annotate(f"{ys[-1]:.2f}", (xs[-1], ys[-1]), textcoords="offset points",
-                    xytext=(6, 0), fontsize=8, color=IMPL_COLOR.get(impl, "gray"))
+        color = IMPL_COLOR.get(impl, "gray")
+        ax.plot(xs, ys, marker="o", lw=2, ms=6, color=color, label=IMPL_NAME.get(impl, impl))
+        ends.append((xs[-1], ys[-1], color))
     allB = sorted({r["B"] for r in rows})
     ax.set_xscale("log", base=2)
+    # Room on the right (and above) for the end-of-line value labels.
+    ax.set_xlim(allB[0] / 1.5, allB[-1] * 4)
+    ax.margins(y=0.08)
     ax.set_xticks(allB)
-    ax.set_xticklabels([_ktick(b) for b in allB])
+    # ha="center" centers each rotated label under its tick (ha="right" hangs it to the left).
+    ax.set_xticklabels([_ktick(b) for b in allB], rotation=45, ha="center", fontsize=8)
     ax.set_xlabel("global batch size B  (decode tokens across all EP ranks)")
+    return ends
 
 
 def plot_vs_sms(rows, ax):
@@ -90,7 +119,7 @@ def plot_vs_sms(rows, ax):
         xs, ys = [x for x, _ in pts], [y for _, y in pts]
         ax.plot(xs, ys, marker="o", lw=1.8, ms=5,
                 color=cm.viridis(i / max(1, len(Bs) - 1)), label=f"DeepEP  B={B}")
-    # NVLS (fixed 148-block cap) and NCCL (NCCL-internal grid) have no swept num_sms axis,
+    # NVLS (own CTA cap, default_num_blocks) and NCCL (NCCL-internal grid) have no swept num_sms axis,
     # so each is drawn as a horizontal reference band+line across the DeepEP sweep.
     for ref in ("nvls", "nccl"):
         vals = [r["ms"] for r in rows if r["impl"] == ref]
@@ -112,18 +141,26 @@ def main():
     p.add_argument("--x", choices=["B", "num_sms"], default="B")
     p.add_argument("--num-layers", type=int, default=88, help="for the title only")
     p.add_argument("--title", default=None)
+    p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
+                   help="where bare --csv names are read from")
+    p.add_argument("--plots-dir", default=os.path.join(REPO_DIR, "plots"),
+                   help="where bare --out names are written (created if missing)")
     args = p.parse_args()
+    csv_path = args.csv if os.path.dirname(args.csv) else os.path.join(args.results_dir, args.csv)
+    out_path = args.out if os.path.dirname(args.out) else os.path.join(args.plots_dir, args.out)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    rows, ep = load(args.csv)
+    rows, ep = load(csv_path)
     subtitle = _subtitle(ep)
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
+    ends = []
     if args.x == "num_sms":
         plot_vs_sms(rows, ax)
         default_title = (f"MoE decode dispatch+combine vs DeepEP num_sms — "
                          f"{args.num_layers} MoE layers/step\n{subtitle}")
     else:
-        plot_vs_B(rows, ax)
+        ends = plot_vs_B(rows, ax)
         default_title = (f"MoE decode dispatch+combine latency — "
                          f"{args.num_layers} MoE layers/step\n{subtitle}")
     ax.set_ylabel("latency per decode step (ms)")
@@ -131,11 +168,12 @@ def main():
     # fast impls. Log keeps all curves legible.
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best", fontsize=8, ncol=2)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
     ax.set_title(args.title or default_title, fontsize=10)
     fig.tight_layout()
-    fig.savefig(args.out, dpi=150)
-    print(f"wrote {args.out}")
+    _label_ends(ax, ends)  # after layout, so label offsets use the final axes geometry
+    fig.savefig(out_path, dpi=150)
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":
