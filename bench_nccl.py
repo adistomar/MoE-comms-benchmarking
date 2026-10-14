@@ -114,6 +114,11 @@ class NCCLBencher:
         for _ in range(num_layers):
             self.step()
 
+    def dispatch_step(self, num_layers: int):
+        """Dispatch-only decode step: num_layers x padded AllGather (no combine)."""
+        for _ in range(num_layers):
+            self.dispatch()
+
     def destroy(self):
         pass
 

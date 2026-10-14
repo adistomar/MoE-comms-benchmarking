@@ -42,6 +42,8 @@ from common import (  # noqa: E402
 
 IMPLS = ("deepep", "nvls", "nccl", "a2a", "naive_agv")
 IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
+# One-CTA-per-token symmetric-memory kernels whose CTA cap (max_num_blocks) --num-blocks sweeps.
+CTA_CAP_IMPLS = ("nvls", "a2a", "naive_agv")
 
 
 def parse_impls(spec: str) -> "list[str]":
@@ -69,6 +71,14 @@ def parse_args():
     p.add_argument("--deepep-num-sms", default=None,
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
                         "clamped to the device SM count; default: the device SM count)")
+    p.add_argument("--num-blocks", default=None,
+                   help="comma-separated CTA caps (max_num_blocks) to sweep for the one-CTA-"
+                        "per-token kernels (nvls, a2a, naive_agv); default: default_num_blocks "
+                        "(4x SMs at EP <= 8, else the SM count)")
+    p.add_argument("--phases", default="decode_step",
+                   help="comma-separated timed phases: decode_step (metadata once + "
+                        "num_layers x dispatch->combine) and/or dispatch (metadata once + "
+                        "num_layers x dispatch only; nvls, a2a, naive_agv, nccl)")
     p.add_argument("--num-layers", type=int, default=88,
                    help="MoE layers replayed per decode step (Nemotron-Super = 88)")
     p.add_argument("--reps", type=int, default=100)
@@ -128,6 +138,13 @@ def main():
     _even = lambda n: max(2, min(int(n), dev_sms) - (min(int(n), dev_sms) % 2))
     deepep_sms = sorted({_even(s) for s in (args.deepep_num_sms or str(dev_sms)).split(",")})
 
+    # CTA-cap sweep for the one-CTA-per-token kernels (None = each bencher's default).
+    cta_caps = sorted({int(n) for n in args.num_blocks.split(",")}) if args.num_blocks else None
+    phases = [p.strip() for p in args.phases.split(",")]
+    for p in phases:
+        if p not in ("decode_step", "dispatch"):
+            raise SystemExit(f"unknown --phases entry '{p}' (choose decode_step, dispatch)")
+
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
         print(f"# EP={world} experts={cfg.num_experts} topk={cfg.topk} hidden={cfg.hidden} "
@@ -135,6 +152,7 @@ def main():
               flush=True)
         print(f"# impl={','.join(impls)} num_layers={args.num_layers} device_sms={dev_sms} "
               f"deepep_num_sms_sweep={deepep_sms}", flush=True)
+        print(f"# phases={','.join(phases)} cta_cap_sweep={cta_caps or 'default'}", flush=True)
 
     # Build benchers.
     benchers = []
@@ -159,11 +177,14 @@ def main():
     # the comm has not been created yet. A barrier here materializes it.
     dist.barrier(group)
     for b in benchers:
+        # Size the barrier's signal pad for the largest swept cap (build() allocates it).
+        if cta_caps and b.name in CTA_CAP_IMPLS:
+            b.num_sms = cta_caps[-1]
         b.build()
     dist.barrier(group)
     if rank == 0:
         for b in benchers:
-            if b.name in ("nvls", "a2a", "naive_agv"):
+            if b.name in CTA_CAP_IMPLS:
                 print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
                       f"{b.num_blocks * world * 4} B of barrier slots; "
                       f"signal pad = {b.signal_pad_bytes} B", flush=True)
@@ -238,30 +259,46 @@ def main():
     rows = []  # (impl, B, num_sms, phase, counts, latency_us, timing_mode)
     nl = args.num_layers
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS, naive AGV-V and A2A-V run once at their block cap
-        # (b.num_sms, see default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
-        sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
+        # DeepEP sweeps num_sms. NVLS, naive AGV-V and A2A-V run at their block cap
+        # (b.num_sms: default_num_blocks, or each --num-blocks value). NCCL picks its own
+        # grid (b.num_sms=-1 = N/A).
+        if b.name == "deepep":
+            sms_list = deepep_sms
+        elif cta_caps and b.name in CTA_CAP_IMPLS:
+            sms_list = cta_caps
+        else:
+            sms_list = [b.num_sms]
         for sms in sms_list:
             if b.name == "deepep":
                 b.set_num_sms(sms)
+            elif b.name in CTA_CAP_IMPLS:
+                b.num_sms = sms  # max_num_blocks passed to the kernels
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
                 b.setup_batch(hidden, topk_idx, topk_weights)
                 counts = all_rank_counts(B, world)
 
-                # Time ONE full decode step = `nl` MoE layers of paired dispatch->
-                # combine (NVLS: + one metadata), captured & replayed as a single
-                # CUDA graph. Recording all nl layers in the graph is what models the
-                # layer dimension; the metadata is included once (per step), not per layer.
-                (_, step_us), mode = timed(lambda: b.decode_step(nl), group, args)
-                rows.append((b.name, B, sms, "decode_step", counts, step_us, mode))
+                for phase in phases:
+                    # decode_step: ONE full decode step = `nl` MoE layers of paired
+                    # dispatch->combine (NVLS: + one metadata), captured & replayed as a
+                    # single CUDA graph. Recording all nl layers in the graph is what models
+                    # the layer dimension; the metadata is included once (per step).
+                    # dispatch: the same, without the combines.
+                    if phase == "dispatch":
+                        if not hasattr(b, "dispatch_step"):
+                            continue  # e.g. DeepEP: combine consumes each dispatch's handle
+                        fn = lambda: b.dispatch_step(nl)
+                    else:
+                        fn = lambda: b.decode_step(nl)
+                    (_, step_us), mode = timed(fn, group, args)
+                    rows.append((b.name, B, sms, phase, counts, step_us, mode))
 
-                if rank == 0:
-                    smstr = f" sms={sms:3d}" if sms >= 0 else " sms= na"
-                    print(f"  {b.name:7s} B={B:4d}{smstr} counts={counts} "
-                          f"decode_step({nl}L)={step_us:9.2f}us "
-                          f"(per-layer={step_us / nl:6.2f}us)  "
-                          f"[{'graph' if mode else 'eager'}]", flush=True)
+                    if rank == 0:
+                        smstr = f" sms={sms:4d}" if sms >= 0 else " sms=  na"
+                        print(f"  {b.name:9s} B={B:7d}{smstr} counts={counts} "
+                              f"{phase}({nl}L)={step_us:11.2f}us "
+                              f"(per-layer={step_us / nl:9.2f}us)  "
+                              f"[{'graph' if mode else 'eager'}]", flush=True)
 
     if rank == 0:
         print("\n# impl,global_B,num_sms,phase,latency_us,timing", flush=True)

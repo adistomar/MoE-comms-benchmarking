@@ -46,12 +46,12 @@ def _subtitle(ep):
             f"hidden=1024 · bf16 · CUDA-graph timing")
 
 
-def load(path):
+def load(path, phase="decode_step"):
     rows = []
     ep = None  # world size = EP = #ranks, inferred from the per_rank_counts list length
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
-            if r["phase"] != "decode_step":
+            if r["phase"] != phase:
                 continue
             if ep is None:
                 parts = [c for c in r.get("per_rank_counts", "").strip().strip("[]").split(",")
@@ -139,6 +139,8 @@ def main():
     p.add_argument("--csv", default="results.csv")
     p.add_argument("--out", default="results.png")
     p.add_argument("--x", choices=["B", "num_sms"], default="B")
+    p.add_argument("--phase", choices=["decode_step", "dispatch"], default="decode_step",
+                   help="which timed phase to plot (CSV phase column)")
     p.add_argument("--num-layers", type=int, default=88, help="for the title only")
     p.add_argument("--title", default=None)
     p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
@@ -150,7 +152,7 @@ def main():
     out_path = args.out if os.path.dirname(args.out) else os.path.join(args.plots_dir, args.out)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    rows, ep = load(csv_path)
+    rows, ep = load(csv_path, args.phase)
     subtitle = _subtitle(ep)
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
@@ -161,7 +163,8 @@ def main():
                          f"{args.num_layers} MoE layers/step\n{subtitle}")
     else:
         ends = plot_vs_B(rows, ax)
-        default_title = (f"MoE decode dispatch+combine latency — "
+        what = "dispatch-only" if args.phase == "dispatch" else "dispatch+combine"
+        default_title = (f"MoE decode {what} latency — "
                          f"{args.num_layers} MoE layers/step\n{subtitle}")
     ax.set_ylabel("latency per decode step (ms)")
     # Log y: latency spans ~1 ms (NVLS) to ~40 ms (NCCL), so a linear axis would squash the

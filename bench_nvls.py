@@ -163,6 +163,14 @@ class NVLSBencher:
             self.dispatch()
             self.combine()
 
+    def dispatch_step(self, num_layers: int):
+        """Dispatch-only decode step: metadata once, then `num_layers` back-to-back AGV-V
+        dispatches. Successive dispatches rewrite the same rows with the same data, so
+        dropping the combine leaves the dispatch's traffic and barrier unchanged."""
+        self.metadata()
+        for _ in range(num_layers):
+            self.dispatch()
+
     # -- correctness -----------------------------------------------------------
     def validate(self):
         """Known-value correctness checks with RANDOM per-element tensors -> list of

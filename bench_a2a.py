@@ -127,6 +127,12 @@ class A2ABencher:
             self.dispatch()
             self.combine()
 
+    def dispatch_step(self, num_layers: int):
+        """Dispatch-only decode step: metadata once, then `num_layers` A2A-V dispatches."""
+        self.metadata()
+        for _ in range(num_layers):
+            self.dispatch()
+
     # -- correctness -----------------------------------------------------------
     def _local_rows(self, routing):
         """[rows] bool: the row has at least one expert on this rank."""
