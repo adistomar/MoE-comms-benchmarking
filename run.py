@@ -5,7 +5,8 @@ Benchmark MoE dispatch/combine schemes in a decode setting within one NVLink dom
   - DeepEP-v2   (A2A over NCCL-Gin),
   - Megatron-NVLS (AllGather-V/ReduceScatter-V via NVLink multicast),
   - Megatron-NCCL (dense AllGather/ReduceScatter, CUDA-graph path, padded to equal counts),
-  - A2A-V       (unicast dispatch / pull combine over symmetric memory).
+  - A2A-V       (unicast dispatch / pull combine over symmetric memory),
+  - Naive AGV-V (NVLS AGV-V/RSV-V, but dispatch stores to every peer instead of multicast).
 
 Launch (one node, 4 GPUs):
     torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a \
@@ -39,7 +40,7 @@ from common import (  # noqa: E402
 )
 
 
-IMPLS = ("deepep", "nvls", "nccl", "a2a")
+IMPLS = ("deepep", "nvls", "nccl", "a2a", "naive_agv")
 IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
 
 
@@ -60,8 +61,8 @@ def parse_impls(spec: str) -> "list[str]":
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--impl", default="all",
-                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
-                        "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
+                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a | naive_agv, "
+                        "or the aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
                         "e.g. --impl deepep,a2a")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
@@ -149,6 +150,9 @@ def main():
     if "a2a" in impls:
         from bench_a2a import A2ABencher
         benchers.append(A2ABencher(cfg, group))
+    if "naive_agv" in impls:
+        from bench_naive_agv import NaiveAllGatherVBencher
+        benchers.append(NaiveAllGatherVBencher(cfg, group))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes
     # NCCL lazily (comm created on first collective); DeepEP's ElasticBuffer ctor
     # reads the comm handle in _C.calculate_elastic_buffer_size, which segfaults if
@@ -159,7 +163,7 @@ def main():
     dist.barrier(group)
     if rank == 0:
         for b in benchers:
-            if b.name in ("nvls", "a2a"):
+            if b.name in ("nvls", "a2a", "naive_agv"):
                 print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
                       f"{b.num_blocks * world * 4} B of barrier slots; "
                       f"signal pad = {b.signal_pad_bytes} B", flush=True)
@@ -234,8 +238,8 @@ def main():
     rows = []  # (impl, B, num_sms, phase, counts, latency_us, timing_mode)
     nl = args.num_layers
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS and A2A-V run once at their block cap (b.num_sms, see
-        # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
+        # DeepEP sweeps num_sms. NVLS, naive AGV-V and A2A-V run once at their block cap
+        # (b.num_sms, see default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
         sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
         for sms in sms_list:
             if b.name == "deepep":

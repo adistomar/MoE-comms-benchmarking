@@ -36,7 +36,7 @@
 
 set -uo pipefail
 BENCH_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_pre/nemotron4/images/mcore_inference_v2_nm4_vlm_20260915.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_pre/users/jjennings/enroot_images/nvidia+pytorch+26.04-py3+dependencies+mamba+hf+quart+orjson+msgpack.sqsh}"
 export DEEPEP_DIR="${DEEPEP_DIR:-$(cd "$BENCH_DIR/.." && pwd)/DeepEP}"
 
 # rank 0 hosts the c10d store (torch env:// init) on the first node in the allocation;
@@ -52,11 +52,16 @@ if [ "$NNODES" -eq 1 ]; then OUT="results"; else OUT="results_${NNODES}n"; fi
 echo "launch: NNODES=${NNODES}  ranks=$(( NNODES * 4 ))  EP=$(( NNODES * 4 ))  impl=${IMPL}  MASTER=${MASTER_ADDR}:${MASTER_PORT}  out=results/${OUT}.csv"
 
 # DeepEP must be built once, from a single task, before the multi-rank run. The fast path
-# in deepep_env.sh then only reinstalls the NCCL wheel in each container.
-srun --ntasks=1 --nodes=1 \
-     --container-image "$CONTAINER_IMAGE" \
-     --container-mounts "/home:/home,/lustre:/lustre" \
-     bash -lc "cd '$BENCH_DIR' && export DEEPEP_DIR='$DEEPEP_DIR' && source ./deepep_env.sh" || exit 1
+# in deepep_env.sh then only reinstalls the NCCL wheel in each container. Skipped when IMPL
+# does not include DeepEP (e.g. IMPL=nvls,a2a,naive_agv), which needs no DeepEP checkout.
+case ",$IMPL," in
+    *,deepep,*|*,both,*|*,all,*)
+        srun --ntasks=1 --nodes=1 \
+             --container-image "$CONTAINER_IMAGE" \
+             --container-mounts "/home:/home,/lustre:/lustre" \
+             bash -lc "cd '$BENCH_DIR' && export DEEPEP_DIR='$DEEPEP_DIR' && source ./deepep_env.sh" || exit 1
+        ;;
+esac
 
 # One task per GPU: NNODES*4 ranks total, 4 per node. Each task runs run.py as one rank.
 # CSVs land in results/, plots in plots/.

@@ -21,6 +21,11 @@ schemes used for **inference decode** within a single NVLink domain:
   its experts (direct peer stores), and combine **pulls** the per-rank partial outputs back
   and sums them in fp32. It is a drop-in alternative to the AGV-V / RSV-V pair (see
   [A2A-V design](#a2a-v-design)).
+- **Naive AGV-V** (`nvls/torch_symm_triton/naive_all_gather_v.py`, `--impl naive_agv`) — the
+  NVLS scheme with the **multicast removed from dispatch**: each row is stored to every
+  rank's buffer through the peer pointers instead of one `multimem.st`, and combine is the
+  same NVLS RSV-V. A baseline for what NVLink multicast buys on the all-gather (see
+  [Naive AGV-V](#naive-agv-v)).
 
 Both Megatron dispatchers are simulated standalone: the NVLS collectives are **vendored**
 (`nvls/`, an isolated copy of Megatron's `torch_symm_triton` + `symmetric_memory.py` +
@@ -49,6 +54,8 @@ step / num_layers.
   outside the graph).
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
+- **Naive AGV-V** per step: as NVLS, with `naive_all_gatherv_3tensor` in place of
+  `multimem_all_gatherv_3tensor`.
 
 ## Experimental setup (Nemotron-Super, GB300 NVL72, 4 GPUs/node)
 
@@ -157,11 +164,30 @@ barrier waits on each source's dispatch, which starts after that source's combin
 **Limits.** EP ≤ 64 (the dedup mask is one int64; asserted in the wrappers); hidden rows must
 be 16-byte aligned; routing ids must be int64; combine supports bf16 partials only.
 
+## Naive AGV-V
+
+`naive_all_gatherv_3tensor` takes the same arguments as `multimem_all_gatherv_3tensor` and
+produces the same buffers: row `rank_token_offset[s] + t` on every rank holds source `s`'s
+token `t` (hidden, routing, probs). The grid, early exit on `ep_max_tokens`, and trailing
+per-CTA-pair barrier are unchanged. Only the store changes: each 16-byte (or 8-byte) chunk is
+loaded once and written with a plain `st.global` to all `EP` ranks' buffers via
+`buffer_ptrs_dev` (`EP − 1` NVLink stores plus one local store), starting at peer `rank + 1`
+so ranks don't all target the same peer at once. Each GPU therefore pushes `EP×` the
+dispatch bytes that NVLS sends (the NVSwitch makes the copies for `multimem.st`). Combine is
+the unchanged NVLS RSV-V, so `naive_agv` vs `nvls` differs only in the dispatch transport.
+
+You cannot get this by passing `multicast_op=False` to the existing AGV-V kernel. That turns
+`multimem.st` into `st.global` but keeps the **multicast** address, and PTX leaves non-`multimem`
+access to a multicast address undefined. Even in the best case, one unicast store reaches one
+place, not every rank.
+
 ## Correctness check (`--validate`)
 
 `torchrun --nproc_per_node=4 run.py --impl nvls,deepep,nccl,a2a --validate` runs known-value
 checks per impl (random tensors, verified element-wise) then exits without timing. It
-confirms NVLS AGV-V gathers each rank's tokens to the right global offset, NVLS RSV-V sums
+confirms NVLS AGV-V (and the naive unicast AGV-V, `--impl naive_agv`, which runs the same checks)
+gathers each rank's tokens to the right global offset — the gathered rows are poisoned and all
+ranks barrier first, so an undelivered row cannot pass on stale data — NVLS RSV-V sums
 across ranks and scatters to the right owner, NCCL's padded AllGather→ReduceScatter
 round-trips correctly, and DeepEP's dispatch→combine round-trips to `m·x` (`m` = #destination
 ranks). For A2A-V, tokens are routed to random subsets of ranks (plus an all-`-1` padding
@@ -248,7 +274,7 @@ one-task-per-GPU launches without torchrun, `launch_rank.sh` sets
 **Outputs.** CSVs are written to `results/` and plots to `plots/` (bare `--out`/`--csv`
 names are resolved there; override with `--results-dir` / `--plots-dir`, or pass a path).
 
-`run.py` flags: `--impl` (comma-separated list of `deepep`, `nvls`, `nccl`, `a2a`, or the
+`run.py` flags: `--impl` (comma-separated list of `deepep`, `nvls`, `nccl`, `a2a`, `naive_agv`, or the
 aliases `both` = deepep,nvls and `all` = deepep,nvls,nccl; e.g. `--impl deepep,a2a`),
 `--batch-sizes`, `--num-layers`, `--deepep-num-sms` (comma list, even, clamped to device
 SM count), `--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--results-dir`,
@@ -266,8 +292,9 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 ## Files
 - `run.py` — torchrun driver (times one full decode step as a CUDA graph).
 - `common.py` — config, global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing).
-- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` — the four benchers; each exposes `decode_step(num_layers)` + `validate()` + `functional_roundtrip()`.
-- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
+- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` / `bench_naive_agv.py` — the benchers; each exposes `decode_step(num_layers)` + `validate()` + `functional_roundtrip()`.
+- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels) and
+  `nvls/torch_symm_triton/naive_all_gather_v.py` (the unicast AGV-V kernel).
 - `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds.
 - `deepep_env.sh` — DeepEP build+runtime env (idempotent; relocatable).
 - `install_deepep_ngc.sh` — one-shot DeepEP wheel install + build (called by `deepep_env.sh`).

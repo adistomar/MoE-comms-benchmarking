@@ -30,9 +30,9 @@ import matplotlib.cm as cm  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
-             "nccl": "NCCL (AllGather)"}
+             "nccl": "NCCL (AllGather)", "naive_agv": "Naive unicast AGv / NVLS RSv"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2a": "tab:red"}
+              "a2a": "tab:red", "naive_agv": "tab:purple"}
 
 
 def _subtitle(ep):

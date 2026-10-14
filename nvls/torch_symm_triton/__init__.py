@@ -2,6 +2,7 @@
 
 from .collectives import multimem_all_gather, multimem_all_gather_fused, multimem_reduce_scatter
 from .fused_collectives import fused_multimem_rs_add_norm_ag
+from .naive_all_gather_v import naive_all_gatherv_3tensor
 from .utils import are_tensors_nvls_eligible, is_device_nvls_capable
 from .variable_collectives import (
     multimem_all_gather_v,

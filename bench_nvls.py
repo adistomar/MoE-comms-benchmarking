@@ -16,6 +16,7 @@ time only the AGV per iteration.
 """
 
 import torch
+import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from nvls.symmetric_memory import SymmetricMemoryManager
@@ -71,6 +72,9 @@ def ensure_signal_pad_size(num_blocks: int, world_size: int) -> int:
 
 class NVLSBencher:
     name = "nvls"
+    # Symmetric-buffer key prefix; subclasses use their own so several can run in one process.
+    buffer_prefix = "ep"
+    label = "NVLS"  # prefix of the validation check names
 
     def __init__(self, cfg: Config, group):
         self.cfg = cfg
@@ -102,16 +106,17 @@ class NVLSBencher:
                 )
             return b
 
-        self.agv_h = buf("ep_agv_h", [gmax, H], torch.bfloat16)
-        self.agv_r = buf("ep_agv_r", [gmax, K], torch.int64)
-        self.agv_p = buf("ep_agv_p", [gmax, K], torch.float32)
+        pre = self.buffer_prefix
+        self.agv_h = buf(f"{pre}_agv_h", [gmax, H], torch.bfloat16)
+        self.agv_r = buf(f"{pre}_agv_r", [gmax, K], torch.int64)
+        self.agv_p = buf(f"{pre}_agv_p", [gmax, K], torch.float32)
         # RSV combine buffer in bf16 (was fp32): halves the combine bytes moved. The
         # cross-rank reduction still ACCUMULATES IN FP32 -- with a bf16 buffer,
         # multimem_reduce_scatter_v sets reduce_f32=False, emitting
         # multimem.ld_reduce.add.acc::f32.v4.bf16x2 (bf16 operands, f32 accumulator); only
         # the data movement and the final stored result are bf16. self.out must match dtype.
-        self.rsv = buf("ep_rsv", [gmax, H], torch.bfloat16)
-        self.meta = buf("ep_meta", [cfg.ep_size], torch.int32)
+        self.rsv = buf(f"{pre}_rsv", [gmax, H], torch.bfloat16)
+        self.meta = buf(f"{pre}_meta", [cfg.ep_size], torch.int32)
 
         # [valid_tokens, rank_token_offset, ep_max_tokens]; written in-place each step.
         self.step_metadata = torch.zeros(3, dtype=torch.int32, device=self.device)
@@ -168,7 +173,9 @@ class NVLSBencher:
         the expected gathered result is exactly that full tensor.
 
         AGV-V: the gather must reproduce the full random tensor bit-exactly (a bf16 copy),
-        and likewise the full routing (int64) and probs (fp32).
+        and likewise the full routing (int64) and probs (fp32). Rows [0, valid) of all three
+        buffers are poisoned (NaN / -1) and every rank barriers before the dispatch, so a row
+        some source failed to deliver to this rank cannot pass on stale data.
         RSV-V: rsv (bf16) is seeded identically on all ranks; the switch-reduced output for
         this rank's owned tokens must equal world * rsv[global_id] element-wise, checked at
         bf16 tolerance (the reduction accumulates in fp32, then rounds the result to bf16).
@@ -189,12 +196,17 @@ class NVLSBencher:
                              full_r[off:off + n].contiguous(),
                              full_p[off:off + n].contiguous())
             self.metadata()
+            self.agv_h["tensor"].view(gcap, H)[:valid] = float("nan")
+            self.agv_r["tensor"].view(gcap, K)[:valid] = -1
+            self.agv_p["tensor"].view(gcap, K)[:valid] = float("nan")
+            torch.cuda.synchronize()
+            dist.barrier(self.group)  # every sentinel is written before anyone dispatches
             self.dispatch()
             torch.cuda.synchronize()
             agv_ok = (torch.equal(self.agv_h["tensor"].view(gcap, H)[:valid], full_h)
                       and torch.equal(self.agv_r["tensor"].view(gcap, K)[:valid], full_r)
                       and torch.equal(self.agv_p["tensor"].view(gcap, K)[:valid], full_p))
-            out.append((f"NVLS AGV-V gather   B={B:<4d}", agv_ok,
+            out.append((f"{self.label} AGV-V gather   B={B:<4d}", agv_ok,
                         "gathered [valid,H] == full random tensor bit-exact (hidden+routing+probs)"))
             # rsv buffer is bf16: seed bf16 so the reference matches what's stored. The
             # multicast reduce sums w identical copies in fp32 (acc::f32) then rounds to bf16.
@@ -205,7 +217,7 @@ class NVLSBencher:
             rsv_ok = (n == 0) or torch.allclose(self.out.to(torch.float32),
                                                 w * rsv_full[off:off + n].to(torch.float32),
                                                 rtol=2e-2, atol=2e-2)
-            out.append((f"NVLS RSV-V reduce   B={B:<4d}", rsv_ok,
+            out.append((f"{self.label} RSV-V reduce   B={B:<4d}", rsv_ok,
                         f"output == world*rsv[global_id] element-wise (bf16); local_tokens={n}"))
         return out
 
