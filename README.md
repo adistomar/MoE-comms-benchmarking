@@ -31,8 +31,9 @@ DeepEP source checkout to build (see Setup).
 
 ## What is measured
 
-**One full decode step** = `--num-layers` MoE layers (default **88**, Nemotron-Super
-depth), each doing a **paired dispatch → (identity expert) → combine**, captured and
+**One full decode step** = `--num-layers` MoE layers (default: the model's MoE block count,
+**40** for Nemotron-3-Super and **48** for Nemotron-3-Ultra; see [Models](#models)), each
+doing a **paired dispatch → (identity expert) → combine**, captured and
 replayed as a **single CUDA graph**. Reported latency is **milliseconds per decode
 step** (all layers), taken as the **max across ranks** (critical path). Per-layer =
 step / num_layers.
@@ -50,18 +51,41 @@ step / num_layers.
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
 
-## Experimental setup (Nemotron-Super, GB300 NVL72, 4 GPUs/node)
+## Experimental setup (GB300 NVL72, 4 GPUs/node)
 
 | | value |
 |---|---|
-| experts / top-k / hidden | 512 / 22 / 1024 |
+| model | `--model ultra` (default) or `--model super`; sets the rows below (see [Models](#models)) |
+| experts / top-k / dispatched row width | 512 / 22 / 1024 (Super) or 2048 (Ultra) — the `moe_latent_size`, since both are latent MoEs |
 | parallelism | EP=4–64 (1 rank/GPU, 1–16 nodes of one NVL72 rack), TP=1, single NVLink domain |
 | dtype | dispatch **bf16** (all four); combine **bf16** for NVLS, DeepEP & A2A-V (all accumulate the sum in fp32: NVLS via `acc::f32`, A2A-V in registers), **fp32** for NCCL |
 | batch axis | **GLOBAL** B ∈ {1,…,1M} tokens across all EP ranks (balanced; B<EP leaves some ranks with 0 tokens; NCCL pads to the per-step max) |
-| layers | 88 MoE layers per decode step (`--num-layers`) |
+| layers | 40 (Super) / 48 (Ultra) MoE layers per decode step; `--num-layers` overrides |
 | routing | uniform: 22 distinct experts/token; identical tensors fed to all impls |
 | no host sync | DeepEP `do_cpu_sync=False`; NVLS / A2A-V on-device metadata; NCCL pad-count all-reduce done in setup (outside the graph) |
 | comm SMs / blocks | DeepEP `num_sms` = device SM count (152 on GB300) unless swept; **NVLS and A2A-V**: CTA cap = 4× SM count at EP ≤ 8, SM count at EP ≥ 16 (see below); NCCL uses NCCL-internal grid |
+
+## Models
+
+`--model` selects a preset in `models.py`, copied from each model's Hugging Face
+`config.json` ([Super](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/blob/main/config.json),
+[Ultra](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16/blob/main/config.json)):
+
+| | Super (120B-A12B) | Ultra (550B-A55B) |
+|---|---|---|
+| blocks (Mamba / MoE / attention) | 88 (40 / **40** / 8) | 108 (48 / **48** / 12) |
+| `hidden_size` | 4096 | 8192 |
+| `moe_latent_size` (dispatched / combined row width) | **1024** | **2048** |
+| `n_routed_experts` / `num_experts_per_tok` | 512 / 22 | 512 / 22 |
+
+Only MoE blocks dispatch and combine, so a decode step has one dispatch → combine per MoE
+block, not per block of the hybrid stack. Both models project tokens from `hidden_size` to
+`moe_latent_size` before routing to experts, so the collectives move `moe_latent_size`-wide
+rows. Super's config gives the layout as `hybrid_override_pattern` (`M` = Mamba, `E` = MoE,
+`*` = attention); Ultra's gives the same as `layers_block_type`, which `models.py` stores in
+the same letter format. The MoE count is computed from the pattern (and asserted against the
+config's block count). Each run records `model` and `num_layers` in its CSV, and
+`plot_results.py` uses them for the plot title.
 
 DeepEP flags: `use_fp8_dispatch=False` (bf16), `allow_hybrid_mode=False` (single
 NVLink domain → flat/direct path, Gin dormant not disabled), `allow_multiple_reduction=True`
@@ -83,7 +107,7 @@ override it per EP via `default_num_blocks` in `bench_nvls.py`:
 
 *Why more CTAs at small EP.* Each CTA has one token's rows in flight, so the bytes in flight
 per GPU are roughly `num_blocks × (distinct ranks a token reaches) × row size` (2 KB for
-hidden=1024 bf16). With top-22 of 512 experts a token reaches ≈4 ranks at EP=4, ≈7.6 at
+Super's 1024-wide bf16 rows, 4 KB for Ultra's 2048). With top-22 of 512 experts a token reaches ≈4 ranks at EP=4, ≈7.6 at
 EP=8, ≈12 at EP=16 and ≈16–19 at EP=32/64. At EP ≤ 8, one CTA per SM therefore has too
 little data in flight to cover NVLink latency, and large batches are latency-bound. A CTA
 sweep on GB300 (per-layer dispatch+combine, B=128K) showed:
@@ -220,37 +244,40 @@ If DeepEP's runtime-vs-linked NCCL check complains, `export EP_SUPPRESS_NCCL_CHE
 **4. Run:**
 ```bash
 # correctness first (no timing) — see the Correctness section
-torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a --validate
+torchrun --nproc_per_node=4 run.py --model super --impl nvls,deepep,a2a --validate
 
-# quick smoke
-torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a --batch-sizes 4 --num-layers 88 \
+# quick smoke (--num-layers defaults to the model's MoE block count: 40 Super, 48 Ultra)
+torchrun --nproc_per_node=4 run.py --model super --impl nvls,deepep,a2a --batch-sizes 4 \
     --reps 3 --warmup 2
 
 # full batch-size sweep -> results/results.csv (DeepEP num_sms defaults to the device SM count)
-torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a \
-    --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192 --num-layers 88 \
+torchrun --nproc_per_node=4 run.py --model ultra --impl nvls,deepep,a2a \
+    --batch-sizes 1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192 \
     --reps 20 --warmup 6 --timing graph --out results.csv
 python3 plot_results.py --csv results.csv --out results.png          # -> plots/results.png
 
 # DeepEP num_sms sweep -> results/results_sms.csv (each num_sms JIT-compiles once;
 # NVLS/NCCL are num_sms-independent reference lines)
-torchrun --nproc_per_node=4 run.py --impl all \
-    --batch-sizes 1,16,128 --deepep-num-sms 4,16,64,128 --num-layers 88 \
+torchrun --nproc_per_node=4 run.py --model super --impl all \
+    --batch-sizes 1,16,128 --deepep-num-sms 4,16,64,128 \
     --reps 10 --warmup 4 --timing graph --out results_sms.csv
 python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
 ```
 Or submit `run.sbatch` (edit the SBATCH headers / `CONTAINER_IMAGE` for your cluster,
 then `sbatch run.sbatch` from the repo directory; multi-node: `sbatch -N 4 --segment=4
-run.sbatch`; pick the impls with `IMPL=nvls,deepep,a2a sbatch run.sbatch`). For
+run.sbatch`; pick the impls with `IMPL=nvls,deepep,a2a sbatch run.sbatch` and the model with
+`MODEL=super sbatch run.sbatch`, default `ultra`; outputs are named
+`results_<model>[_<N>n].csv`). For
 one-task-per-GPU launches without torchrun, `launch_rank.sh` sets
 `RANK`/`WORLD_SIZE`/`MASTER_ADDR` from Slurm and forwards its arguments to `run.py`.
 
 **Outputs.** CSVs are written to `results/` and plots to `plots/` (bare `--out`/`--csv`
 names are resolved there; override with `--results-dir` / `--plots-dir`, or pass a path).
 
-`run.py` flags: `--impl` (comma-separated list of `deepep`, `nvls`, `nccl`, `a2a`, or the
-aliases `both` = deepep,nvls and `all` = deepep,nvls,nccl; e.g. `--impl deepep,a2a`),
-`--batch-sizes`, `--num-layers`, `--deepep-num-sms` (comma list, even, clamped to device
+`run.py` flags: `--model {super,ultra}` (default `ultra`), `--impl` (comma-separated list of
+`deepep`, `nvls`, `nccl`, `a2a`, or the aliases `both` = deepep,nvls and `all` =
+deepep,nvls,nccl; e.g. `--impl deepep,a2a`), `--batch-sizes`, `--num-layers` (default: the
+model's MoE block count), `--deepep-num-sms` (comma list, even, clamped to device
 SM count), `--timing {graph,eager}`, `--reps`, `--warmup`, `--out`, `--results-dir`,
 `--validate` (correctness checks then exit — see above).
 
@@ -265,10 +292,11 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 
 ## Files
 - `run.py` — torchrun driver (times one full decode step as a CUDA graph).
-- `common.py` — config, global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing).
+- `models.py` — Nemotron-3 Super / Ultra presets (`--model`): layer pattern, MoE layer count, experts, top-k, `hidden_size`, `moe_latent_size` (torch-free; also used by the plotter).
+- `common.py` — config (shape from the model preset), global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing).
 - `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` — the four benchers; each exposes `decode_step(num_layers)` + `validate()` + `functional_roundtrip()`.
 - `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
-- `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds.
+- `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds; the title shows the CSV's model and MoE layers per step.
 - `deepep_env.sh` — DeepEP build+runtime env (idempotent; relocatable).
 - `install_deepep_ngc.sh` — one-shot DeepEP wheel install + build (called by `deepep_env.sh`).
 - `launch_rank.sh` — per-task launcher (one Slurm task per GPU = one EP rank).

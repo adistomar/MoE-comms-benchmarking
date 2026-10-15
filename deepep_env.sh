@@ -24,17 +24,24 @@ BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DEEPEP_DIR="${DEEPEP_DIR:-$(cd "$BENCH_DIR/.." 2>/dev/null && pwd)/DeepEP}"
 
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-10.0}"      # sm_100 (B200); 9.0 for H100
-# Keep caches off Lustre (cluster policy): JIT kernels persist in $HOME, pip is ephemeral.
-export EP_JIT_CACHE_DIR="${EP_JIT_CACHE_DIR:-$HOME/.cache/deepep_jit}"
+# Keep caches off Lustre (cluster policy): JIT kernels persist in the user's real home, pip is
+# ephemeral. Inside a pyxis container $HOME is /root (discarded with the container), so use the
+# mounted /home/$SLURM_JOB_USER when it exists.
+_deepep_home="$HOME"
+if [ -n "${SLURM_JOB_USER:-}" ] && [ -d "/home/${SLURM_JOB_USER}" ]; then
+    _deepep_home="/home/${SLURM_JOB_USER}"
+fi
+export EP_JIT_CACHE_DIR="${EP_JIT_CACHE_DIR:-$_deepep_home/.cache/deepep_jit}"
+unset _deepep_home
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${TMPDIR:-/tmp}/pip_cache}"
 mkdir -p "$EP_JIT_CACHE_DIR" "$PIP_CACHE_DIR"
 export EP_NCCL_ROOT_DIR="${EP_NCCL_ROOT_DIR:-/usr/local/lib/python3.12/dist-packages/nvidia/nccl}"
 export EP_NVSHMEM_ROOT_DIR="${EP_NVSHMEM_ROOT_DIR:-/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem}"
 export LD_LIBRARY_PATH="$EP_NCCL_ROOT_DIR/lib:$EP_NVSHMEM_ROOT_DIR/lib:${LD_LIBRARY_PATH:-}"
 
-if python3 -c 'import deep_ep' 2>/dev/null; then
-    :  # already importable in this container
-elif ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
+# Prefer the pinned checkout's build: some containers ship their own (different) deep_ep, and
+# PYTHONPATH=$DEEPEP_DIR (set below) puts the pinned one ahead of it.
+if ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
     echo "[deepep_env] using prebuilt _C extension at $DEEPEP_DIR (fast path; no recompile)"
     # Guard the wheel install + symlink creation with a node-local file lock. With one task
     # per GPU (multi-node launch) every local rank sources this concurrently and would
@@ -54,6 +61,9 @@ elif ls "$DEEPEP_DIR"/deep_ep/_C*.so >/dev/null 2>&1; then
         done
     ) 9>"${TMPDIR:-/tmp}/deepep_env_install.lock"
     export PYTHONPATH="$DEEPEP_DIR:${PYTHONPATH:-}"
+elif [ ! -d "$DEEPEP_DIR" ] && python3 -c 'import deep_ep' 2>/dev/null; then
+    echo "[deepep_env] WARNING: no DeepEP checkout at $DEEPEP_DIR; using the container's deep_ep" \
+         "($(python3 -c 'import deep_ep; print(deep_ep.__file__)')), not the pinned af9a0403" >&2
 elif [ "${SLURM_NTASKS:-1}" -gt 1 ]; then
     # Never build from every rank of a multi-task job (shared checkout on Lustre).
     echo "[deepep_env] ERROR: no DeepEP build at $DEEPEP_DIR inside a ${SLURM_NTASKS}-task job." \
@@ -62,4 +72,5 @@ elif [ "${SLURM_NTASKS:-1}" -gt 1 ]; then
 else
     echo "[deepep_env] no prebuilt extension found; building DeepEP from $DEEPEP_DIR"
     DEEPEP_DIR="$DEEPEP_DIR" bash "$BENCH_DIR/install_deepep_ngc.sh"
+    export PYTHONPATH="$DEEPEP_DIR:${PYTHONPATH:-}"
 fi

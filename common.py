@@ -3,8 +3,9 @@
 Shared configuration, input generation, and timing utilities for the
 DeepEP-v2 (A2A) vs Megatron-NVLS (AGV/RSV) MoE dispatch/combine decode benchmark.
 
-Model / parallelism (Nemotron-3 Super, single GB200 node, 4x B200):
-  num_experts=512, top-k=22, hidden=1024, EP=4 (one rank per GPU, TP=1).
+Model shape (experts, top-k, dispatched row width) comes from the --model preset in
+models.py (Nemotron-3 Super or Ultra). Parallelism: pure EP (one rank per GPU, TP=1),
+EP = world size.
 
 Batch-size axis is GLOBAL: B is the total number of decode tokens across all
 EP ranks. Tokens are distributed as evenly as possible; for B<EP some ranks
@@ -13,29 +14,37 @@ hold 0 tokens. See docs/moe_dispatcher_deep_dive*.md and bench/README.md.
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.distributed as dist
 
-# ---- Model / parallelism constants -------------------------------------------
-NUM_EXPERTS = 512
-TOPK = 22
-HIDDEN = 1024
-# EP size == world size (pure EP=4, TP=1). Resolved at runtime from the PG.
+from models import DEFAULT_MODEL, ModelSpec, get_model
 
 
 @dataclass
 class Config:
-    num_experts: int = NUM_EXPERTS
-    topk: int = TOPK
-    hidden: int = HIDDEN
-    # Filled at init from the process group / args:
+    model: str = DEFAULT_MODEL     # models.MODELS key; sets the three fields below
+    # From the model preset (not constructor arguments):
+    num_experts: int = field(init=False)  # n_routed_experts
+    topk: int = field(init=False)         # num_experts_per_tok
+    hidden: int = field(init=False)       # dispatched row width = moe_latent_size
+    # Filled at init from the process group / args (EP size == world size):
     ep_size: int = 0
     rank: int = 0
     local_rank: int = 0
     per_rank_cap: int = 0          # max tokens any single rank can hold (ceil(max_B/ep))
     seed: int = 1234
+
+    def __post_init__(self):
+        spec = self.spec
+        self.num_experts = spec.num_experts
+        self.topk = spec.topk
+        self.hidden = spec.dispatch_hidden
+
+    @property
+    def spec(self) -> ModelSpec:
+        return get_model(self.model)
 
     @property
     def num_local_experts(self) -> int:
