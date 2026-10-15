@@ -8,7 +8,10 @@ run.py. Latency is reported in MILLISECONDS (max across ranks).
   --x num_sms   latency vs DeepEP num_sms (one line per batch size), with an
                 NVLS SM-independent reference band+line.
 
-Depends only on matplotlib + stdlib csv (no torch).
+The title and subtitle (model, MoE layers per step, experts, top-k, dispatched row width)
+come from the CSV's model / num_layers columns (written by run.py).
+
+Depends only on matplotlib + stdlib csv + models.py (no torch).
 
   python3 plot_results.py --csv results.csv --out results.png
   python3 plot_results.py --csv results_sms.csv --x num_sms --out results_sms.png
@@ -27,6 +30,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.cm as cm  # noqa: E402
 
+from models import get_model  # noqa: E402
+
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
@@ -35,20 +40,25 @@ IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
               "a2a": "tab:red"}
 
 
-def _subtitle(ep):
+def _subtitle(ep, spec):
     """Subtitle line. EP size and node count are derived from the data (per_rank_counts
-    length in load()), so the plot reflects the actual run rather than a hardcoded config."""
+    length in load()) and the MoE shape from the model preset, so the plot reflects the
+    actual run rather than a hardcoded config."""
+    shape = (f"{spec.num_experts} experts · top-k={spec.topk} · "
+             f"latent={spec.moe_latent_size} (hidden={spec.hidden_size}) · bf16 · "
+             f"CUDA-graph timing")
     if not ep:
-        return "512 experts · top-k=22 · hidden=1024 · bf16 · CUDA-graph timing"
+        return shape
     nodes = max(1, ep // 4)  # 4 GB300 GPUs per node
     node_str = "1 node" if nodes == 1 else f"{nodes} nodes"
-    return (f"EP={ep} · {node_str} (4×B300/node) · 512 experts · top-k=22 · "
-            f"hidden=1024 · bf16 · CUDA-graph timing")
+    return f"EP={ep} · {node_str} (4×B300/node) · {shape}"
 
 
 def load(path):
+    """-> (rows, ep, model, num_layers)."""
     rows = []
     ep = None  # world size = EP = #ranks, inferred from the per_rank_counts list length
+    models, layers = set(), set()
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
             if r["phase"] != "decode_step":
@@ -58,10 +68,15 @@ def load(path):
                          if c.strip() != ""]
                 if parts:
                     ep = len(parts)
+            models.add(r["model"])
+            layers.add(int(r["num_layers"]))
             rows.append(dict(impl=r["impl"], B=int(r["global_B"]),
                              num_sms=int(r.get("num_sms", -1)),
                              ms=float(r["latency_us"]) / 1000.0))  # us -> ms
-    return rows, ep
+    if len(models) != 1 or len(layers) != 1:
+        raise SystemExit(f"{path}: expected one model / num_layers, got models={sorted(models)}, "
+                         f"num_layers={sorted(layers)}")
+    return rows, ep, models.pop(), layers.pop()
 
 
 def _ktick(v):
@@ -139,7 +154,6 @@ def main():
     p.add_argument("--csv", default="results.csv")
     p.add_argument("--out", default="results.png")
     p.add_argument("--x", choices=["B", "num_sms"], default="B")
-    p.add_argument("--num-layers", type=int, default=88, help="for the title only")
     p.add_argument("--title", default=None)
     p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
                    help="where bare --csv names are read from")
@@ -150,19 +164,20 @@ def main():
     out_path = args.out if os.path.dirname(args.out) else os.path.join(args.plots_dir, args.out)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    rows, ep = load(csv_path)
-    subtitle = _subtitle(ep)
+    rows, ep, model, num_layers = load(csv_path)
+    spec = get_model(model)
+    subtitle = _subtitle(ep, spec)
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
     ends = []
     if args.x == "num_sms":
         plot_vs_sms(rows, ax)
-        default_title = (f"MoE decode dispatch+combine vs DeepEP num_sms — "
-                         f"{args.num_layers} MoE layers/step\n{subtitle}")
+        default_title = (f"{spec.name} MoE decode dispatch+combine vs DeepEP num_sms — "
+                         f"{num_layers} MoE layers/step\n{subtitle}")
     else:
         ends = plot_vs_B(rows, ax)
-        default_title = (f"MoE decode dispatch+combine latency — "
-                         f"{args.num_layers} MoE layers/step\n{subtitle}")
+        default_title = (f"{spec.name} MoE decode dispatch+combine latency — "
+                         f"{num_layers} MoE layers/step\n{subtitle}")
     ax.set_ylabel("latency per decode step (ms)")
     # Log y: latency spans ~1 ms (NVLS) to ~40 ms (NCCL), so a linear axis would squash the
     # fast impls. Log keeps all curves legible.

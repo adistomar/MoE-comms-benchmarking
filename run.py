@@ -8,9 +8,11 @@ Benchmark MoE dispatch/combine schemes in a decode setting within one NVLink dom
   - A2A-V       (unicast dispatch / pull combine over symmetric memory).
 
 Launch (one node, 4 GPUs):
-    torchrun --nproc_per_node=4 run.py --impl nvls,deepep,a2a \
+    torchrun --nproc_per_node=4 run.py --model super --impl nvls,deepep,a2a \
         --batch-sizes 1,2,4,8,16,32,64,128 --reps 100
 
+--model (models.py: super | ultra) sets the MoE shape (experts, top-k, dispatched row width
+= moe_latent_size) and the default --num-layers (the model's MoE block count).
 B is the GLOBAL decode-token count across all EP ranks (B=1 => one token total).
 Times ONE full decode step = `--num-layers` MoE layers of paired dispatch->combine
 (NVLS also runs its once-per-step metadata kernel once), captured and replayed as a
@@ -37,6 +39,7 @@ import torch.distributed as dist  # noqa: E402
 from common import (  # noqa: E402
     Config, init_distributed, make_inputs, all_rank_counts, time_region,
 )
+from models import DEFAULT_MODEL, MODELS, get_model  # noqa: E402
 
 
 IMPLS = ("deepep", "nvls", "nccl", "a2a")
@@ -59,6 +62,9 @@ def parse_impls(spec: str) -> "list[str]":
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--model", choices=sorted(MODELS), default=DEFAULT_MODEL,
+                   help="model whose MoE shape to benchmark (models.py): sets experts, top-k, "
+                        "dispatched row width and the default --num-layers")
     p.add_argument("--impl", default="all",
                    help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
                         "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
@@ -68,8 +74,9 @@ def parse_args():
     p.add_argument("--deepep-num-sms", default=None,
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
                         "clamped to the device SM count; default: the device SM count)")
-    p.add_argument("--num-layers", type=int, default=88,
-                   help="MoE layers replayed per decode step (Nemotron-Super = 88)")
+    p.add_argument("--num-layers", type=int, default=None,
+                   help="MoE layers replayed per decode step (default: the model's MoE block "
+                        "count -- Super 40, Ultra 48)")
     p.add_argument("--reps", type=int, default=100)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--timing", choices=["graph", "eager"], default="graph")
@@ -114,8 +121,12 @@ def main():
 
     group, rank, world, local_rank = init_distributed()
 
+    spec = get_model(args.model)
+    if args.num_layers is None:
+        args.num_layers = spec.num_moe_layers
     batch_sizes = [int(b) for b in args.batch_sizes.split(",")]
     cfg = Config(
+        model=args.model,
         ep_size=world, rank=rank, local_rank=local_rank, seed=args.seed,
         per_rank_cap=-(-max(batch_sizes) // world),  # ceil(max_B / ep)
     )
@@ -129,6 +140,10 @@ def main():
 
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
+        print(f"# model={spec.name} ({args.model}): {spec.num_blocks} blocks, "
+              f"{spec.num_moe_layers} MoE, "
+              f"hidden_size={spec.hidden_size} moe_latent_size={spec.moe_latent_size}",
+              flush=True)
         print(f"# EP={world} experts={cfg.num_experts} topk={cfg.topk} hidden={cfg.hidden} "
               f"per_rank_cap={cfg.per_rank_cap} timing={args.timing} reps={args.reps}",
               flush=True)
@@ -260,18 +275,21 @@ def main():
                           f"[{'graph' if mode else 'eager'}]", flush=True)
 
     if rank == 0:
-        print("\n# impl,global_B,num_sms,phase,latency_us,timing", flush=True)
+        print("\n# impl,global_B,num_sms,phase,latency_us,timing,model,num_layers", flush=True)
         for name, B, sms, phase, counts, us, mode in rows:
-            print(f"{name},{B},{sms},{phase},{us:.3f},{'graph' if mode else 'eager'}", flush=True)
+            print(f"{name},{B},{sms},{phase},{us:.3f},{'graph' if mode else 'eager'},"
+                  f"{args.model},{nl}", flush=True)
         if args.out:
             out_path = (args.out if os.path.dirname(args.out)
                         else os.path.join(args.results_dir, args.out))
             os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
             with open(out_path, "w") as f:
-                f.write("impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing\n")
+                # model / num_layers let plot_results.py label the plot without flags.
+                f.write("impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing,"
+                        "model,num_layers\n")
                 for name, B, sms, phase, counts, us, mode in rows:
                     f.write(f"{name},{B},{sms},{phase},\"{counts}\",{us:.4f},"
-                            f"{'graph' if mode else 'eager'}\n")
+                            f"{'graph' if mode else 'eager'},{args.model},{nl}\n")
             print(f"# wrote {out_path}", flush=True)
 
     for b in benchers:
