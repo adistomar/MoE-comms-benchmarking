@@ -12,10 +12,15 @@ per-step max count to satisfy the equal-count requirement -- exactly the dispatc
 one-time all-reduce(MAX) in setup_batch, OUTSIDE any CUDA graph, so the timed decode step
 has no host sync.
 
-Same dense algorithm as NVLSAllGatherVDispatcher; the ONLY difference is the transport
-(NCCL ring/tree collectives vs NVLS NVLink multicast). To keep the comparison to transport
-alone, dispatch gathers the same three tensors NVLS does (hidden bf16, routing int64,
-probs fp32) and combine ReduceScatters in fp32 (matching NVLS's fp32 RSV precision).
+Same dense algorithm as NVLSAllGatherVDispatcher; the difference is the transport
+(NCCL ring/tree collectives vs NVLS NVLink multicast) and the combine dtype. Dispatch
+gathers the same three tensors NVLS does (hidden bf16, routing int64, probs fp32). Combine
+ReduceScatters in fp32: Megatron's NCCL path passes no output buffer to vllm_fused_moe, which
+then returns fp32, and reduce-scatters that (NVLS reduces a bf16 buffer with fp32 accumulate).
+
+With --expert vllm, each layer runs vllm_fused_moe on every gathered row (global expert ids,
+valid rows = EP x padded count) into the fp32 ReduceScatter input, as Megatron does. Padding
+rows are routed to expert -1, as Megatron masks CUDA-graph padding, so no expert computes them.
 
 We time the PAIRED dispatch->combine as one decode step (num_layers x), all captured in a
 single CUDA graph. There is NO once-per-step metadata collective on the CG path (counts
@@ -38,6 +43,7 @@ class NCCLBencher:
         self.num_sms = -1  # reported as n/a
         self.device = torch.device("cuda", cfg.local_rank)
         self._built = False
+        self.expert = None  # None = identity expert; else a common.VllmExperts
 
     def set_num_sms(self, num_sms: int):
         """No-op: NCCL AllGather/ReduceScatter pick their own grid; no num_sms knob."""
@@ -55,11 +61,14 @@ class NCCLBencher:
         self.g_h = torch.empty(gcap, H, dtype=torch.bfloat16, device=dev)
         self.g_r = torch.empty(gcap, K, dtype=torch.int64, device=dev)
         self.g_p = torch.empty(gcap, K, dtype=torch.float32, device=dev)
-        # Combine input = expert output; ReduceScatter runs in fp32 (matches NVLS RSV, so
-        # NCCL-vs-NVLS isolates transport). Pre-filled so combine timing has valid data.
+        # Combine input = expert output, fp32 (vllm_fused_moe's output dtype without an output
+        # buffer, which Megatron reduce-scatters). Pre-filled so identity-expert combine timing
+        # has valid data; the vllm expert overwrites the valid rows each layer.
         self.rs_in = torch.empty(gcap, H, dtype=torch.float32, device=dev)
         self.rs_in.normal_()
         self.out = torch.empty(cap, H, dtype=torch.float32, device=dev)
+        # Gathered rows the experts process (Megatron's _valid_tokens_tensor): EP x pad_to.
+        self.valid_tokens = torch.zeros(1, dtype=torch.int32, device=dev)
         self.n = 0
         self.pad_to = 0
         self._built = True
@@ -77,13 +86,16 @@ class NCCLBencher:
         n = hidden.shape[0]
         self.n = n
         self.pad_to = self._max_count(n)  # equalize counts across ranks (CG requirement)
-        # Fill the padded local buffers; rows [n:pad_to] stay zero (the padding).
+        # Fill the padded local buffers; rows [n:pad_to] are padding: zero hidden/probs, and
+        # routed to no expert (-1), as Megatron masks CUDA-graph padding rows.
         self.pad_h[:n] = hidden
         self.pad_h[n:self.pad_to] = 0
         self.pad_r[:n] = topk_idx.to(torch.int64)
-        self.pad_r[n:self.pad_to] = 0
+        self.pad_r[n:self.pad_to] = -1
         self.pad_p[:n] = topk_weights
         self.pad_p[n:self.pad_to] = 0
+        # Megatron's CG-path update_metadata: valid rows = EP x (equal) local count.
+        self.valid_tokens.fill_(self.pad_to * self.cfg.ep_size)
 
     # -- timed ops -------------------------------------------------------------
     def dispatch(self):
@@ -103,16 +115,28 @@ class NCCLBencher:
         g = p * self.cfg.ep_size
         dist.reduce_scatter_tensor(self.out[:p], self.rs_in[:g], group=self.group)
 
+    def run_expert(self):
+        """Megatron's expert call for this dispatcher: every gathered row, global expert ids,
+        no output buffer (here: the fp32 ReduceScatter input, the same dtype and rows)."""
+        cfg = self.cfg
+        g = self.pad_to * cfg.ep_size
+        self.expert(self.g_h[:g], self.g_p[:g], self.g_r[:g], self.valid_tokens,
+                    cfg.rank * cfg.num_local_experts, self.rs_in[:g], g)
+
     def step(self):
-        """One MoE layer: AllGather dispatch -> (identity expert) -> ReduceScatter combine."""
+        """One MoE layer: AllGather dispatch -> expert -> ReduceScatter combine."""
         self.dispatch()
+        if self.expert is not None:
+            self.run_expert()
         self.combine()
 
     def decode_step(self, num_layers: int):
-        """One full decode step: num_layers x (dispatch -> combine). No once-per-step
-        metadata collective on the CG path (equal counts guaranteed by padding)."""
+        """One full decode step: num_layers x (dispatch -> expert -> combine). No once-per-step
+        metadata collective on the CG path (equal counts guaranteed by padding). Returns the
+        last layer's output for this rank's real tokens."""
         for _ in range(num_layers):
             self.step()
+        return self.out[:self.n]
 
     def destroy(self):
         pass
@@ -165,8 +189,8 @@ class NCCLBencher:
         dist.all_gather_into_tensor(self.g_h[:g], self.pad_h[:p], group=self.group)
         dist.all_gather_into_tensor(self.g_r[:g], self.pad_r[:p], group=self.group)
         # Masked identity: rank r contributes a gathered token iff that token routed >=1
-        # expert local to rank r. Padded rows have hidden==0, so they contribute 0 (and are
-        # truncated anyway), regardless of their (zero) routing.
+        # expert local to rank r. Padded rows (routing -1, hidden 0) contribute 0 and are
+        # truncated anyway.
         gr = self.g_r[:g]
         local = ((gr >= rank * epr) & (gr < (rank + 1) * epr)).any(dim=1)  # [g] bool
         self.rs_in[:g] = torch.where(local.view(g, 1), self.g_h[:g].to(torch.float32),

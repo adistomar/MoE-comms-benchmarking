@@ -1,0 +1,81 @@
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+W1025 00:45:25.928000 2293384 torch/distributed/run.py:851] 
+W1025 00:45:25.928000 2293384 torch/distributed/run.py:851] *****************************************
+W1025 00:45:25.928000 2293384 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1025 00:45:25.928000 2293384 torch/distributed/run.py:851] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+NCCL version 2.32.3+cuda13.4
+# MoE dispatch/combine decode benchmark
+# model=Nemotron-3-Super-120B-A12B (super): 88 blocks, 40 MoE, hidden_size=4096 moe_latent_size=1024
+# EP=4 experts=512 topk=22 hidden=1024 per_rank_cap=2048 timing=graph reps=20
+# impl=a2a,nvls,deepep num_layers=40 device_sms=152 deepep_num_sms_sweep=[0]
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/aditomar/MoE-comms-benchmarking/nvls/symmetric_memory.py:54: FutureWarning: `enable_symm_mem_for_group` is deprecated. There is no need to call this function anymore.
+  symm_mem.enable_symm_mem_for_group(process_group.group_name)
+# expert=identity per_rank_cap=2048
+# nvls: 608 CTAs x EP=4 -> 9728 B of barrier slots; signal pad = 9728 B
+# a2a: 608 CTAs x EP=4 -> 9728 B of barrier slots; signal pad = 9728 B
+  deepep  B=  64 sms= 36 counts=[16, 16, 16, 16] decode_step(40L)=  1394.60us (per-layer= 34.86us)  [graph]
+  deepep  B= 128 sms= 36 counts=[32, 32, 32, 32] decode_step(40L)=  1405.21us (per-layer= 35.13us)  [graph]
+  deepep  B= 256 sms= 36 counts=[64, 64, 64, 64] decode_step(40L)=  1416.76us (per-layer= 35.42us)  [graph]
+  deepep  B= 512 sms= 36 counts=[128, 128, 128, 128] decode_step(40L)=  1441.87us (per-layer= 36.05us)  [graph]
+  deepep  B=1024 sms= 36 counts=[256, 256, 256, 256] decode_step(40L)=  1513.27us (per-layer= 37.83us)  [graph]
+  deepep  B=2048 sms= 36 counts=[512, 512, 512, 512] decode_step(40L)=  1731.14us (per-layer= 43.28us)  [graph]
+  deepep  B=4096 sms= 36 counts=[1024, 1024, 1024, 1024] decode_step(40L)=  2177.99us (per-layer= 54.45us)  [graph]
+  deepep  B=8192 sms= 36 counts=[2048, 2048, 2048, 2048] decode_step(40L)=  3208.24us (per-layer= 80.21us)  [graph]
+  nvls    B=  64 sms=608 counts=[16, 16, 16, 16] decode_step(40L)=   513.00us (per-layer= 12.83us)  [graph]
+  nvls    B= 128 sms=608 counts=[32, 32, 32, 32] decode_step(40L)=   529.04us (per-layer= 13.23us)  [graph]
+  nvls    B= 256 sms=608 counts=[64, 64, 64, 64] decode_step(40L)=   529.82us (per-layer= 13.25us)  [graph]
+  nvls    B= 512 sms=608 counts=[128, 128, 128, 128] decode_step(40L)=   555.54us (per-layer= 13.89us)  [graph]
+  nvls    B=1024 sms=608 counts=[256, 256, 256, 256] decode_step(40L)=   733.95us (per-layer= 18.35us)  [graph]
+  nvls    B=2048 sms=608 counts=[512, 512, 512, 512] decode_step(40L)=  1109.36us (per-layer= 27.73us)  [graph]
+  nvls    B=4096 sms=608 counts=[1024, 1024, 1024, 1024] decode_step(40L)=  1658.97us (per-layer= 41.47us)  [graph]
+  nvls    B=8192 sms=608 counts=[2048, 2048, 2048, 2048] decode_step(40L)=  2772.00us (per-layer= 69.30us)  [graph]
+  a2a     B=  64 sms=608 counts=[16, 16, 16, 16] decode_step(40L)=   649.88us (per-layer= 16.25us)  [graph]
+  a2a     B= 128 sms=608 counts=[32, 32, 32, 32] decode_step(40L)=   650.41us (per-layer= 16.26us)  [graph]
+  a2a     B= 256 sms=608 counts=[64, 64, 64, 64] decode_step(40L)=   673.38us (per-layer= 16.83us)  [graph]
+  a2a     B= 512 sms=608 counts=[128, 128, 128, 128] decode_step(40L)=   692.15us (per-layer= 17.30us)  [graph]
+  a2a     B=1024 sms=608 counts=[256, 256, 256, 256] decode_step(40L)=   966.65us (per-layer= 24.17us)  [graph]
+  a2a     B=2048 sms=608 counts=[512, 512, 512, 512] decode_step(40L)=  1198.40us (per-layer= 29.96us)  [graph]
+  a2a     B=4096 sms=608 counts=[1024, 1024, 1024, 1024] decode_step(40L)=  1607.78us (per-layer= 40.19us)  [graph]
+  a2a     B=8192 sms=608 counts=[2048, 2048, 2048, 2048] decode_step(40L)=  2503.62us (per-layer= 62.59us)  [graph]
+
+# impl,global_B,num_sms,phase,latency_us,timing,model,num_layers
+deepep,64,36,decode_step,1394.598,graph,super,40
+deepep,128,36,decode_step,1405.208,graph,super,40
+deepep,256,36,decode_step,1416.758,graph,super,40
+deepep,512,36,decode_step,1441.867,graph,super,40
+deepep,1024,36,decode_step,1513.272,graph,super,40
+deepep,2048,36,decode_step,1731.144,graph,super,40
+deepep,4096,36,decode_step,2177.986,graph,super,40
+deepep,8192,36,decode_step,3208.245,graph,super,40
+nvls,64,608,decode_step,513.005,graph,super,40
+nvls,128,608,decode_step,529.042,graph,super,40
+nvls,256,608,decode_step,529.816,graph,super,40
+nvls,512,608,decode_step,555.539,graph,super,40
+nvls,1024,608,decode_step,733.950,graph,super,40
+nvls,2048,608,decode_step,1109.360,graph,super,40
+nvls,4096,608,decode_step,1658.966,graph,super,40
+nvls,8192,608,decode_step,2772.002,graph,super,40
+a2a,64,608,decode_step,649.885,graph,super,40
+a2a,128,608,decode_step,650.413,graph,super,40
+a2a,256,608,decode_step,673.379,graph,super,40
+a2a,512,608,decode_step,692.154,graph,super,40
+a2a,1024,608,decode_step,966.646,graph,super,40
+a2a,2048,608,decode_step,1198.403,graph,super,40
+a2a,4096,608,decode_step,1607.778,graph,super,40
+a2a,8192,608,decode_step,2503.616,graph,super,40
+# wrote results/ep4_8272103/comm.csv

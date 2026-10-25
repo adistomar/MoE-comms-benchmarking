@@ -13,7 +13,8 @@ dispatch and combine, so a decode step does one dispatch->combine per E block.
 
 Both are latent MoEs: tokens are projected from hidden_size down to moe_latent_size before
 dispatch and back up after combine, so the rows the collectives move are moe_latent_size wide
-(ModelSpec.dispatch_hidden).
+(ModelSpec.dispatch_hidden). Each routed expert is a moe_latent_size -> moe_intermediate_size ->
+moe_latent_size MLP with squared ReLU (mlp_hidden_act = relu2), which run.py --expert vllm runs.
 
 Kept free of torch so plot_results.py can import it.
 """
@@ -29,6 +30,7 @@ class ModelSpec:
     layer_pattern: str      # one char per block: M = Mamba, E = MoE, * = attention
     hidden_size: int        # model hidden size (router input)
     moe_latent_size: int    # dispatched / combined row width
+    moe_intermediate_size: int  # routed-expert FFN width (Megatron's moe_ffn_hidden_size)
     num_experts: int        # n_routed_experts
     topk: int               # num_experts_per_tok
 
@@ -56,6 +58,7 @@ MODELS = {
                       "EMEMEMEM*EMEMEMEME",
         hidden_size=4096,
         moe_latent_size=1024,
+        moe_intermediate_size=2688,
         num_experts=512,
         topk=22,
     ),
@@ -67,6 +70,7 @@ MODELS = {
                       "EMEMEMEM*EMEMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME",
         hidden_size=8192,
         moe_latent_size=2048,
+        moe_intermediate_size=5120,
         num_experts=512,
         topk=22,
     ),

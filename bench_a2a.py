@@ -9,9 +9,11 @@ partial outputs back from those ranks:
   dispatch (per MoE layer) : a2a_dispatch_v(hidden -> dst ranks; routing, probs -> all ranks)
   combine  (per MoE layer) : a2a_combine_v(pull bf16 partials from dst ranks, fp32 sum)
 
-Like the NVLS bencher, the timed step reduces a pre-filled partial buffer (no expert compute).
-The combine buffer is bf16 with fp32 accumulation, matching the NVLS (bf16 RSV) and DeepEP
-(bf16 combine) setups.
+With --expert vllm, each layer runs vllm_fused_moe between the two (every row of the gathered
+layout, global expert ids, output written into the partial buffer, rows with no local expert
+skipped), as Megatron's NVLAllToAllVDispatcher does. With the identity expert, combine pulls a
+pre-filled partial buffer. The combine buffer is bf16 with fp32 accumulation, matching the NVLS
+(bf16 RSV) and DeepEP (bf16 combine) setups.
 """
 
 import torch
@@ -36,6 +38,7 @@ class A2ABencher:
         # count (see default_num_blocks in bench_nvls.py).
         self.num_sms = default_num_blocks(self.device, cfg.ep_size)
         self._built = False
+        self.expert = None  # None = identity expert; else a common.VllmExperts
 
     # -- one-time allocation (collective) --------------------------------------
     def build(self):
@@ -116,16 +119,31 @@ class A2ABencher:
         )
 
     def step(self):
-        """One MoE layer: A2A-V dispatch -> (identity expert) -> A2A-V combine."""
+        """One identity-expert MoE layer: A2A-V dispatch -> A2A-V combine."""
         self.dispatch()
         self.combine()
 
     def decode_step(self, num_layers: int):
-        """One decode step: metadata once (first MoE layer), then dispatch -> combine per layer."""
+        """One decode step: metadata once (first MoE layer), then dispatch -> expert -> combine
+        per layer. Returns the last layer's combined output."""
         self.metadata()
         for _ in range(num_layers):
             self.dispatch()
+            if self.expert is not None:
+                self.run_expert()
             self.combine()
+        return self.out
+
+    def run_expert(self):
+        """Megatron's expert call for nvl_a2a: every row of the gathered layout, global expert
+        ids, output written straight into the bf16 partial buffer. Rows of tokens with no local
+        expert are not written (write_unrouted_rows=False), since the combine never reads them;
+        Megatron versions without that option write every row."""
+        cfg = self.cfg
+        self.expert(self.recv_h["tensor"], self.recv_p["tensor"], self.recv_r["tensor"],
+                    self.step_metadata[0:1], cfg.rank * cfg.num_local_experts,
+                    self.partial["tensor"], self.local_tokens * cfg.ep_size,
+                    write_unrouted_rows=False)
 
     # -- correctness -----------------------------------------------------------
     def _local_rows(self, routing):
