@@ -53,7 +53,7 @@ ranks** (critical path). Per-layer = step / num_layers.
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
 
-## Experimental setup (GB200 NVL72, 4 GPUs/node)
+## Experimental setup (GB300 NVL72, 4 GPUs/node)
 
 | | value |
 |---|---|
@@ -105,10 +105,10 @@ per token**, so the CTA-grid ceiling `max_num_blocks` bounds how many tokens are
 (the grid is `min(per_rank_cap, max_num_blocks)`; CTAs past the step's `ep_max_tokens` exit
 at once). Upstream Megatron hardcodes 128. Here the wrappers in
 `nvls/torch_symm_triton/variable_collectives.py` and `all_to_all_v.py` default to the
-**device SM count** (`multi_processor_count`: 152 on these GB200 nodes, 148 on B200), and the benchers
+**device SM count** (`multi_processor_count`: 152 on GB300, 148 on B200), and the benchers
 override it per EP via `default_num_blocks` in `bench_nvls.py`:
 
-| EP | CTA cap (GB200) |
+| EP | CTA cap (GB300) |
 |---|---|
 | ≤ 8 | 4 × SMs = 608 |
 | ≥ 16 | SMs = 152 |
@@ -118,7 +118,7 @@ per GPU are roughly `num_blocks × (distinct ranks a token reaches) × row size`
 Super's 1024-wide bf16 rows, 4 KB for Ultra's 2048). With top-22 of 512 experts a token reaches ≈4 ranks at EP=4, ≈7.6 at
 EP=8, ≈12 at EP=16 and ≈16–19 at EP=32/64. At EP ≤ 8, one CTA per SM therefore has too
 little data in flight to cover NVLink latency, and large batches are latency-bound. A CTA
-sweep on GB200 (per-layer dispatch+combine, B=128K) showed:
+sweep on GB300 (per-layer dispatch+combine, B=128K) showed:
 
 | | 148 CTAs (~1/SM) | 592–1184 CTAs (4–8/SM) |
 |---|---|---|
@@ -238,7 +238,7 @@ full batch (`B=2·ep`) and the 0-token-rank case (`B=1`).
 ## Setup
 
 **Requirements.** GPUs in a **single NVLink domain** (one node, or several nodes of one
-NVL72 rack; validated on 4× B200 and GB200 NVL72) and an NGC-style PyTorch container
+NVL72 rack; validated on 4× B200 / GB200 and GB300 NVL72) and an NGC-style PyTorch container
 (validated: CUDA 13, torch 2.11/2.12, **Triton 3.6/3.7**, `torch.distributed._symmetric_memory`
 + multicast, NVRTC/ptxas). Multi-GPU launched with `torchrun` or one task per GPU
 (`launch_rank.sh`). NVLS and A2A-V need Hopper+ (SM ≥ 9) with NVLink + symmetric memory, and
@@ -369,8 +369,9 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 - **Sample plots.** `plots/comm/` and `plots/comm_expert/` hold the EP=4/16/32/64 sweeps of
   a2a, nvls and DeepEP (`EPBuffer`, at `auto` and at the device SM count) for Super and Ultra on
   GB200, communication only (B up to 1M) and with `--expert vllm` (B up to 128K). The older
-  `plots/results_ultra_ep*.png` predate the move to `EPBuffer`: their DeepEP lines are DeepEP v2
-  (`ElasticBuffer`) at `num_sms` = the device SM count, communication only.
+  `plots/old_GB300/results_ultra_ep*.png` are GB300 runs from before the move to `EPBuffer`: their
+  DeepEP lines are DeepEP v2 (`ElasticBuffer`) at `num_sms` = the device SM count, communication
+  only.
 - **A2A-V routing/probs multicast.** Every rank receives every token's 264-byte routing +
   probs row (`B × 264` bytes per layer), independent of EP. Hidden-row traffic shrinks as EP
   grows, so this becomes a larger share of dispatch traffic at large EP (~14% of incoming
