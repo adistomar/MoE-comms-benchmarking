@@ -1,7 +1,8 @@
 """Per-kernel cost of Megatron's vllm_fused_moe in the two input layouts the e2e run feeds it.
 
-One GPU, no communication. Models rank 0 of an EP group (experts [0, E/EP)) for Super's MoE
-(512 experts, top-22, latent 1024, ffn 2688, squared ReLU), with uniform routing:
+One GPU, no communication. Models rank 0 of an EP group (experts [0, E/EP)) for the --model
+preset's MoE (models.py; Super: 512 experts, top-22, latent 1024, ffn 2688, squared ReLU), with
+uniform routing:
 
   gathered (nvls / nvl_a2a): all B global rows, global expert ids, valid_tokens = B
   gathered_skip (nvl_a2a)  : the same, with write_unrouted_rows=False
@@ -12,7 +13,8 @@ Both layouts hold the same (token, local expert) pairs, so the GEMM work is iden
 both use num_tokens_hint = B, as Megatron does. Each layer's call is captured in a CUDA graph
 and replayed; a torch.profiler pass splits the time by kernel.
 
-    python3 expert_breakdown.py --ep 64 --per-rank-cap 2048 --batch-sizes 1024,4096,8192
+    python3 expert_breakdown.py --model super --ep 64 --per-rank-cap 2048 \
+        --batch-sizes 1024,4096,8192 --megatron-path /path/to/Megatron-LM
 """
 
 import argparse
@@ -22,9 +24,12 @@ import sys
 
 import torch
 
+from models import MODELS, get_model
+
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--model", choices=sorted(MODELS), default="super")
     p.add_argument("--ep", type=int, default=64)
     p.add_argument("--per-rank-cap", type=int, default=2048)
     p.add_argument("--batch-sizes", default="64,256,1024,2048,4096,8192,16384,32768,65536,131072")
@@ -35,7 +40,8 @@ def main():
     from megatron.core.inference.moe.fused_moe import ActivationType
     from megatron.core.inference.moe.vllm_fused_moe import VllmFusedMoeBuffers, vllm_fused_moe
 
-    E, K, H, FFN = 512, 22, 1024, 2688
+    spec = get_model(args.model)
+    E, K, H, FFN = spec.num_experts, spec.topk, spec.dispatch_hidden, spec.moe_intermediate_size
     L = E // args.ep  # local experts
     rows = args.ep * args.per_rank_cap  # Megatron's buffer height (gathered and compact alike)
     dev = torch.device("cuda", 0)
@@ -48,7 +54,8 @@ def main():
     has_skip = "write_unrouted_rows" in inspect.signature(vllm_fused_moe).parameters
     out = torch.empty(rows, H, dtype=torch.bfloat16, device=dev)
 
-    print(f"# EP={args.ep} local_experts={L} buffer_rows={rows} reps={args.reps}")
+    print(f"# model={args.model} EP={args.ep} local_experts={L} buffer_rows={rows} "
+          f"reps={args.reps}")
     print("layout,B,valid_rows,total_us,kernel,kernel_us")
     for B in [int(b) for b in args.batch_sizes.split(",")]:
         assert B <= rows

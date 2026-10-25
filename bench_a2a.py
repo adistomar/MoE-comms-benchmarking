@@ -9,9 +9,11 @@ partial outputs back from those ranks:
   dispatch (per MoE layer) : a2a_dispatch_v(hidden -> dst ranks; routing, probs -> all ranks)
   combine  (per MoE layer) : a2a_combine_v(pull bf16 partials from dst ranks, fp32 sum)
 
-Like the NVLS bencher, the timed step reduces a pre-filled partial buffer (no expert compute).
-The combine buffer is bf16 with fp32 accumulation, matching the NVLS (bf16 RSV) and DeepEP
-(bf16 combine) setups.
+With --expert vllm, each layer runs vllm_fused_moe between the two (every row of the gathered
+layout, global expert ids, output written into the partial buffer, rows with no local expert
+skipped), as Megatron's NVLAllToAllVDispatcher does. With the identity expert, combine pulls a
+pre-filled partial buffer. The combine buffer is bf16 with fp32 accumulation, matching the NVLS
+(bf16 RSV) and DeepEP (bf16 combine) setups.
 """
 
 import torch
@@ -117,18 +119,20 @@ class A2ABencher:
         )
 
     def step(self):
-        """One MoE layer: A2A-V dispatch -> (identity expert) -> A2A-V combine."""
+        """One identity-expert MoE layer: A2A-V dispatch -> A2A-V combine."""
         self.dispatch()
         self.combine()
 
     def decode_step(self, num_layers: int):
-        """One decode step: metadata once (first MoE layer), then dispatch -> combine per layer."""
+        """One decode step: metadata once (first MoE layer), then dispatch -> expert -> combine
+        per layer. Returns the last layer's combined output."""
         self.metadata()
         for _ in range(num_layers):
             self.dispatch()
             if self.expert is not None:
                 self.run_expert()
             self.combine()
+        return self.out
 
     def run_expert(self):
         """Megatron's expert call for nvl_a2a: every row of the gathered layout, global expert

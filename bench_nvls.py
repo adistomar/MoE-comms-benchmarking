@@ -2,17 +2,17 @@
 """
 Isolated NVLS collective bencher. Replicates exactly the collective sequence
 that megatron NVLSAllGatherVDispatcher.token_dispatch / token_combine perform,
-stripped of shared-expert / latent / expert-GEMM / preprocess machinery:
+stripped of shared-expert / latent / preprocess machinery:
 
-  dispatch (per MoE layer)  : multimem_all_gatherv_3tensor(hidden, routing, probs)
-  combine  (per MoE layer)  : multimem_reduce_scatter_v(rsv)
   metadata (once per step)  : fused_metadata_update  -> [valid, offset, ep_max]
+  dispatch (per MoE layer)  : multimem_all_gatherv_3tensor(hidden, routing, probs)
+  expert   (per MoE layer)  : --expert vllm only: vllm_fused_moe on every gathered row
+                              (global expert ids), output written into the RSV buffer
+  combine  (per MoE layer)  : multimem_reduce_scatter_v(rsv)
 
-DECISION (see bench/README.md): fused_metadata_update runs ONCE per decode step
-at the first MoE layer (verified: megatron inference/utils.py:157) and is
-routing-independent, so it is EXCLUDED from the per-layer dispatch timing and
-reported separately. We run it once in setup to populate _step_metadata, then
-time only the AGV per iteration.
+fused_metadata_update is routing-independent, so Megatron runs it ONCE per decode step, at
+the first MoE layer; decode_step does the same. With the identity expert, combine reduces a
+pre-filled RSV buffer (the timed step does not wire dispatch to combine).
 """
 
 import torch
@@ -153,13 +153,15 @@ class NVLSBencher:
     def decode_step(self, num_layers: int):
         """One full decode step across `num_layers` MoE layers: the token-count
         metadata (fused_metadata_update) runs ONCE per step (first MoE layer), then
-        each layer does AGV-V dispatch -> RSV-V combine."""
+        each layer does AGV-V dispatch -> expert -> RSV-V combine. Returns the last
+        layer's combined output."""
         self.metadata()
         for _ in range(num_layers):
             self.dispatch()
             if self.expert is not None:
                 self.run_expert()
             self.combine()
+        return self.out
 
     def run_expert(self):
         """Megatron's expert call for this dispatcher: every gathered row, global expert ids,
@@ -226,7 +228,7 @@ class NVLSBencher:
         source token's (gathered) value to its combine sum iff that token routed >=1 expert
         local to rank r (the routing mask Megatron applies), UNWEIGHTED. So the result is
         (#distinct destination ranks for t) * x[t] -- the SAME quantity DeepEP's rank-layout
-        combine yields, which lets run.py cross-check NVLS(fp32) against DeepEP(bf16).
+        combine yields, which lets run.py cross-check NVLS against DeepEP.
 
         NOTE: this wires dispatch->combine functionally (rsv derived from the AGV output),
         unlike the timed step() which reduces a disconnected pre-filled rsv."""

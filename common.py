@@ -1,15 +1,15 @@
 # Copyright (c) 2026. MoE dispatch/combine decode benchmark — shared utilities.
 """
-Shared configuration, input generation, and timing utilities for the
-DeepEP-v2 (A2A) vs Megatron-NVLS (AGV/RSV) MoE dispatch/combine decode benchmark.
+Shared configuration, input generation, timing and expert-compute utilities for the MoE
+dispatch/combine decode benchmark (DeepEP EPBuffer, Megatron NVLS / NCCL, A2A-V).
 
-Model shape (experts, top-k, dispatched row width) comes from the --model preset in
-models.py (Nemotron-3 Super or Ultra). Parallelism: pure EP (one rank per GPU, TP=1),
+Model shape (experts, top-k, dispatched row width, expert FFN width) comes from the --model
+preset in models.py (Nemotron-3 Super or Ultra). Parallelism: pure EP (one rank per GPU, TP=1),
 EP = world size.
 
 Batch-size axis is GLOBAL: B is the total number of decode tokens across all
 EP ranks. Tokens are distributed as evenly as possible; for B<EP some ranks
-hold 0 tokens. See docs/moe_dispatcher_deep_dive*.md and bench/README.md.
+hold 0 tokens. See README.md.
 """
 
 import inspect
@@ -187,8 +187,15 @@ def time_region(fn, group, warmup: int, iters: int, use_graph: bool):
 
 
 # ---- Real expert compute (optional) ------------------------------------------
-# Per-expert FFN width (moe_ffn_hidden_size) of each model's routed experts, for --expert vllm.
-MOE_FFN_HIDDEN = {"super": 2688}
+def expert_weights(cfg: Config, rank: int, device: torch.device):
+    """Random BF16 weights (fc1 [E, ffn, H], fc2 [E, H, ffn]) of EP rank `rank`'s local experts,
+    seeded per rank, so any rank can regenerate any other rank's experts (the reference check).
+    Scaled so activations stay O(1)."""
+    ffn, H, E = cfg.spec.moe_intermediate_size, cfg.hidden, cfg.num_local_experts
+    gen = torch.Generator(device=device).manual_seed(cfg.seed + 7 * rank)
+    fc1 = (torch.randn(E, ffn, H, generator=gen, device=device) * H ** -0.5).to(torch.bfloat16)
+    fc2 = (torch.randn(E, H, ffn, generator=gen, device=device) * ffn ** -0.5).to(torch.bfloat16)
+    return fc1, fc2
 
 
 class VllmExperts:
@@ -204,15 +211,9 @@ class VllmExperts:
         from megatron.core.inference.moe.vllm_fused_moe import (
             VllmFusedMoeBuffers, vllm_fused_moe,
         )
-        if cfg.model not in MOE_FFN_HIDDEN:
-            raise SystemExit(f"--expert vllm: no moe_ffn_hidden_size for model '{cfg.model}'")
-        ffn, H, E = MOE_FFN_HIDDEN[cfg.model], cfg.hidden, cfg.num_local_experts
-        gen = torch.Generator(device=device).manual_seed(cfg.seed + 7 * cfg.rank)
-        self.fc1 = (torch.randn(E, ffn, H, generator=gen, device=device) * H ** -0.5
-                    ).to(torch.bfloat16)
-        self.fc2 = (torch.randn(E, H, ffn, generator=gen, device=device) * ffn ** -0.5
-                    ).to(torch.bfloat16)
-        self.num_local_experts = E
+        self.cfg = cfg
+        self.fc1, self.fc2 = expert_weights(cfg, cfg.rank, device)
+        self.num_local_experts = cfg.num_local_experts
         self._fn = vllm_fused_moe
         # Megatron before write_unrouted_rows always wrote every row.
         self._has_skip = "write_unrouted_rows" in inspect.signature(vllm_fused_moe).parameters
@@ -220,8 +221,8 @@ class VllmExperts:
         # Worst-case-sized intermediates, allocated once as Megatron's context does (max rows
         # entering the MoE = per-rank cap * EP), so nothing allocates inside graph capture.
         VllmFusedMoeBuffers.allocate_buffers(
-            max_tokens=max_rows, topk=cfg.topk, fc1_output_size=ffn, hidden_size=H,
-            num_local_experts=E, device=device,
+            max_tokens=max_rows, topk=cfg.topk, fc1_output_size=cfg.spec.moe_intermediate_size,
+            hidden_size=cfg.hidden, num_local_experts=self.num_local_experts, device=device,
         )
 
     def __call__(self, hidden, probs, routing, valid_tokens, local_expert_start, out,
@@ -237,3 +238,26 @@ class VllmExperts:
             num_tokens_hint=num_tokens_hint,
             **({"write_unrouted_rows": write_unrouted_rows} if self._has_skip else {}),
         )
+
+    def reference(self, hidden, topk_idx, topk_weights) -> torch.Tensor:
+        """fp32 MoE output of this rank's tokens over all their experts, computed with plain
+        torch from every owner rank's regenerated weights: sum_k p[t,k] * fc2 relu(fc1 x[t])^2.
+        What dispatch -> experts -> combine must return, up to bf16 rounding (validation)."""
+        cfg, E = self.cfg, self.num_local_experts
+        x = hidden.to(torch.float32)
+        out = torch.zeros_like(x)
+        for r in range(cfg.ep_size):
+            on_r = (topk_idx >= 0) & (topk_idx // E == r)
+            if not bool(on_r.any()):
+                continue
+            fc1, fc2 = ((self.fc1, self.fc2) if r == cfg.rank
+                        else expert_weights(cfg, r, hidden.device))
+            tok, k = on_r.nonzero(as_tuple=True)
+            local = topk_idx[tok, k] - r * E
+            for e in local.unique().tolist():
+                sel = local == e
+                t = tok[sel]
+                h = torch.relu(x[t] @ fc1[e].to(torch.float32).T).square()
+                y = (h @ fc2[e].to(torch.float32).T) * topk_weights[t, k[sel]].unsqueeze(1)
+                out.index_add_(0, t, y)
+        return out
