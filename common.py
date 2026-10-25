@@ -12,6 +12,7 @@ EP ranks. Tokens are distributed as evenly as possible; for B<EP some ranks
 hold 0 tokens. See docs/moe_dispatcher_deep_dive*.md and bench/README.md.
 """
 
+import inspect
 import math
 import os
 from dataclasses import dataclass, field
@@ -183,3 +184,56 @@ def time_region(fn, group, warmup: int, iters: int, use_graph: bool):
     t = torch.tensor([local_us], device=torch.cuda.current_device(), dtype=torch.float64)
     dist.all_reduce(t, op=dist.ReduceOp.MAX, group=group)
     return local_us, float(t.item())
+
+
+# ---- Real expert compute (optional) ------------------------------------------
+# Per-expert FFN width (moe_ffn_hidden_size) of each model's routed experts, for --expert vllm.
+MOE_FFN_HIDDEN = {"super": 2688}
+
+
+class VllmExperts:
+    """Megatron's inference expert GEMMs (vllm_fused_moe, BF16, squared ReLU), run between
+    dispatch and combine with the same arguments Megatron's MoE layer passes for each
+    dispatcher. Weights are random: only the work matters, not the values.
+
+    Needs the Megatron-LM repo on sys.path (run.py --megatron-path).
+    """
+
+    def __init__(self, cfg: Config, max_rows: int, device: torch.device):
+        from megatron.core.inference.moe.fused_moe import ActivationType
+        from megatron.core.inference.moe.vllm_fused_moe import (
+            VllmFusedMoeBuffers, vllm_fused_moe,
+        )
+        if cfg.model not in MOE_FFN_HIDDEN:
+            raise SystemExit(f"--expert vllm: no moe_ffn_hidden_size for model '{cfg.model}'")
+        ffn, H, E = MOE_FFN_HIDDEN[cfg.model], cfg.hidden, cfg.num_local_experts
+        gen = torch.Generator(device=device).manual_seed(cfg.seed + 7 * cfg.rank)
+        self.fc1 = (torch.randn(E, ffn, H, generator=gen, device=device) * H ** -0.5
+                    ).to(torch.bfloat16)
+        self.fc2 = (torch.randn(E, H, ffn, generator=gen, device=device) * ffn ** -0.5
+                    ).to(torch.bfloat16)
+        self.num_local_experts = E
+        self._fn = vllm_fused_moe
+        # Megatron before write_unrouted_rows always wrote every row.
+        self._has_skip = "write_unrouted_rows" in inspect.signature(vllm_fused_moe).parameters
+        self._act = ActivationType.SQUARED_RELU
+        # Worst-case-sized intermediates, allocated once as Megatron's context does (max rows
+        # entering the MoE = per-rank cap * EP), so nothing allocates inside graph capture.
+        VllmFusedMoeBuffers.allocate_buffers(
+            max_tokens=max_rows, topk=cfg.topk, fc1_output_size=ffn, hidden_size=H,
+            num_local_experts=E, device=device,
+        )
+
+    def __call__(self, hidden, probs, routing, valid_tokens, local_expert_start, out,
+                 num_tokens_hint, write_unrouted_rows=True):
+        return self._fn(
+            hidden, probs, self.fc1, self.fc2,
+            activation_type=self._act,
+            num_local_experts=self.num_local_experts,
+            local_expert_start=local_expert_start,
+            valid_tokens=valid_tokens,
+            routing_map=routing,
+            out=out,
+            num_tokens_hint=num_tokens_hint,
+            **({"write_unrouted_rows": write_unrouted_rows} if self._has_skip else {}),
+        )

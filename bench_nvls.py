@@ -79,6 +79,7 @@ class NVLSBencher:
         # Block cap passed to AGV/RSV as max_num_blocks (and reported as NVLS's block count).
         self.num_sms = default_num_blocks(self.device, cfg.ep_size)
         self._built = False
+        self.expert = None  # None = identity expert; else a common.VllmExperts
 
     # -- one-time allocation (collective) --------------------------------------
     def build(self):
@@ -156,7 +157,17 @@ class NVLSBencher:
         self.metadata()
         for _ in range(num_layers):
             self.dispatch()
+            if self.expert is not None:
+                self.run_expert()
             self.combine()
+
+    def run_expert(self):
+        """Megatron's expert call for this dispatcher: every gathered row, global expert ids,
+        output written straight into the RSV buffer."""
+        cfg = self.cfg
+        self.expert(self.agv_h["tensor"], self.agv_p["tensor"], self.agv_r["tensor"],
+                    self.step_metadata[0:1], cfg.rank * cfg.num_local_experts,
+                    self.rsv["tensor"], self.local_tokens * cfg.ep_size)
 
     # -- correctness -----------------------------------------------------------
     def validate(self):

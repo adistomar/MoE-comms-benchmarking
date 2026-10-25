@@ -16,7 +16,10 @@ the handle + buffer state produced by its immediately-preceding dispatch, so the
 two belong together (timing them separately is unsupported).
 """
 
+import os
+
 import torch
+import torch.distributed as dist
 
 import deep_ep
 
@@ -32,9 +35,13 @@ class DeepEPBencher:
         self.num_sms = num_sms
         self.device = torch.device("cuda", cfg.local_rank)
         self._built = False
+        self.expert = None  # None = identity expert; else a common.VllmExperts
 
     def build(self):
         cfg = self.cfg
+        if hasattr(deep_ep, "EPBuffer"):
+            self._build_epbuffer()
+            return
         self.buf = deep_ep.ElasticBuffer(
             self.group,
             num_max_tokens_per_rank=cfg.per_rank_cap,
@@ -54,9 +61,45 @@ class DeepEPBencher:
         self.topk_idx_t = getattr(deep_ep, "topk_idx_t", torch.int64)
         self._built = True
 
+    def _build_epbuffer(self):
+        """DeepEP >= 2.5 (EPBuffer), configured like Megatron's DeepEPDispatcher: NVLink only
+        (EP_DISABLE_GIN=1, allow_hybrid_mode=False) and EPBuffer's defaults otherwise
+        (allow_multiple_reduction=True, prefer_overlap_with_compute=True, deterministic=False).
+        """
+        cfg = self.cfg
+        os.environ.setdefault("EP_DISABLE_GIN", "1")
+        self.buf = deep_ep.EPBuffer(
+            self.group,
+            num_max_tokens_per_rank=cfg.per_rank_cap,
+            hidden=cfg.hidden,
+            num_topk=cfg.topk,
+            allow_hybrid_mode=False,
+            explicitly_destroy=True,
+        )
+        self.v25 = True
+        self.topk_idx_t = getattr(deep_ep, "topk_idx_t", torch.int64)
+        # Megatron's combine input: vllm_fused_moe writes the expert output here.
+        self.combine_input = torch.empty(cfg.ep_size * cfg.per_rank_cap, cfg.hidden,
+                                         dtype=torch.bfloat16, device=self.device)
+        # Received-token count of the current layer (Megatron's _valid_tokens_tensor).
+        self.recv_count = torch.zeros(1, dtype=torch.int32, device=self.device)
+        self._built = True
+        self.set_num_sms(self.num_sms)
+
+    def theoretical_num_sms(self) -> int:
+        """DeepEP's bandwidth-model SM count, agreed across ranks with MAX (what Megatron
+        uses when inference_deepep_num_sms is unset)."""
+        n = self.buf.get_theoretical_num_sms(self.cfg.num_experts, self.cfg.topk)
+        t = torch.tensor([n], dtype=torch.int32, device=self.device)
+        dist.all_reduce(t, op=dist.ReduceOp.MAX, group=self.group)
+        return int(t.item())
+
     def set_num_sms(self, num_sms: int):
         """Change the SM count used by dispatch/combine (buffer is SM-count-agnostic,
-        so no rebuild needed; each value JIT-compiles its own kernels on first use)."""
+        so no rebuild needed; each value JIT-compiles its own kernels on first use).
+        0 means DeepEP's theoretical count (Megatron's default); needs DeepEP >= 2.5."""
+        if num_sms == 0 and self._built:
+            num_sms = self.theoretical_num_sms()
         self.num_sms = num_sms
 
     def setup_batch(self, hidden, topk_idx, topk_weights):
@@ -66,6 +109,18 @@ class DeepEPBencher:
         self.topk_weights = topk_weights.contiguous()
 
     def _dispatch_call(self):
+        if getattr(self, "v25", False):
+            # Same arguments as Megatron's DeepEPDispatcher.token_dispatch.
+            return self.buf.dispatch(
+                self.hidden,
+                topk_idx=self.topk_idx,
+                topk_weights=self.topk_weights,
+                num_experts=self.cfg.num_experts,
+                num_max_tokens_per_rank=self.cfg.per_rank_cap,
+                num_sms=self.num_sms,
+                do_cpu_sync=False,
+                do_expand=False,
+            )
         return self.buf.dispatch(
             self.hidden,
             topk_idx=self.topk_idx,
@@ -85,8 +140,19 @@ class DeepEPBencher:
     def step(self):
         """One MoE layer: dispatch -> (identity expert) -> combine, PAIRED
         (combine consumes the fresh dispatch's handle)."""
-        recv_x, _, _, handle, _ = self._dispatch_call()
+        recv_x, recv_idx, recv_w, handle, _ = self._dispatch_call()
         rx = recv_x if isinstance(recv_x, torch.Tensor) else recv_x[0]
+        if getattr(self, "v25", False):
+            if self.expert is not None:
+                # Megatron's DeepEP path: received count -> valid tokens, local expert ids
+                # (start 0), expert output written straight into the combine input.
+                self.recv_count.copy_(handle.psum_num_recv_tokens_per_scaleup_rank[-1:])
+                self.expert(rx, recv_w, recv_idx, self.recv_count, 0, self.combine_input,
+                            self.hidden.shape[0] * self.cfg.ep_size)
+                rx = self.combine_input
+            # Same call as Megatron's DeepEPDispatcher.token_combine.
+            self.buf.combine(rx, handle=handle)
+            return
         self.buf.combine(
             rx, handle=handle, topk_weights=None, bias=None,
             num_sms=self.num_sms, num_qps=0,

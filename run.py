@@ -73,7 +73,18 @@ def parse_args():
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default=None,
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
-                        "clamped to the device SM count; default: the device SM count)")
+                        "clamped to the device SM count; default: the device SM count). "
+                        "'auto' = DeepEP's get_theoretical_num_sms (Megatron's default; "
+                        "DeepEP >= 2.5)")
+    p.add_argument("--per-rank-cap", type=int, default=None,
+                   help="per-rank token capacity of every buffer (default: "
+                        "ceil(max batch / EP)); Megatron's e2e uses round_up(max_tokens)/TP")
+    p.add_argument("--expert", choices=["identity", "vllm"], default="identity",
+                   help="expert step between dispatch and combine: identity (comm only) or "
+                        "vllm (Megatron's vllm_fused_moe with the model's expert shapes, called "
+                        "the way Megatron calls it for each dispatcher)")
+    p.add_argument("--megatron-path", default=os.environ.get("MEGATRON_PATH"),
+                   help="Megatron-LM checkout to import vllm_fused_moe from (--expert vllm)")
     p.add_argument("--num-layers", type=int, default=None,
                    help="MoE layers replayed per decode step (default: the model's MoE block "
                         "count -- Super 40, Ultra 48)")
@@ -118,6 +129,13 @@ def main():
     # _C.calculate_elastic_buffer_size segfaults during ElasticBuffer construction.
     if "deepep" in impls:
         import deep_ep  # noqa: F401
+    if args.expert == "vllm":
+        # Import Megatron before NCCL starts too: megatron.core imports deep_ep (via
+        # transformer/moe/fused_a2a.py), and its import-time duplicate-NCCL check fails once a
+        # communicator has loaded HPC-X's NCCL net plugin.
+        if args.megatron_path:
+            sys.path.insert(0, args.megatron_path)
+        import megatron.core.inference.moe.vllm_fused_moe  # noqa: F401
 
     group, rank, world, local_rank = init_distributed()
 
@@ -128,15 +146,18 @@ def main():
     cfg = Config(
         model=args.model,
         ep_size=world, rank=rank, local_rank=local_rank, seed=args.seed,
-        per_rank_cap=-(-max(batch_sizes) // world),  # ceil(max_B / ep)
+        per_rank_cap=args.per_rank_cap or -(-max(batch_sizes) // world),  # ceil(max_B / ep)
     )
+    assert cfg.per_rank_cap * world >= max(batch_sizes), "--per-rank-cap too small"
     device = torch.device("cuda", local_rank)
 
     # DeepEP num_sms sweep: even values, clamped to the device SM count; defaults to the
     # device SM count. (NVLS / A2A-V use a CTA cap instead, see default_num_blocks.)
     dev_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     _even = lambda n: max(2, min(int(n), dev_sms) - (min(int(n), dev_sms) % 2))
-    deepep_sms = sorted({_even(s) for s in (args.deepep_num_sms or str(dev_sms)).split(",")})
+    # 0 = DeepEP's theoretical SM count, resolved after the buffer is built.
+    deepep_sms = sorted({0 if s == "auto" else _even(s)
+                         for s in (args.deepep_num_sms or str(dev_sms)).split(",")})
 
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
@@ -172,6 +193,13 @@ def main():
     for b in benchers:
         b.build()
     dist.barrier(group)
+    if args.expert == "vllm":
+        from common import VllmExperts
+        experts = VllmExperts(cfg, max_rows=cfg.global_cap, device=device)
+        for b in benchers:
+            b.expert = experts
+    if rank == 0:
+        print(f"# expert={args.expert} per_rank_cap={cfg.per_rank_cap}", flush=True)
     if rank == 0:
         for b in benchers:
             if b.name in ("nvls", "a2a"):
@@ -255,6 +283,7 @@ def main():
         for sms in sms_list:
             if b.name == "deepep":
                 b.set_num_sms(sms)
+                sms = b.num_sms  # resolves 'auto' (0)
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
                 b.setup_batch(hidden, topk_idx, topk_weights)
@@ -286,10 +315,11 @@ def main():
             with open(out_path, "w") as f:
                 # model / num_layers let plot_results.py label the plot without flags.
                 f.write("impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing,"
-                        "model,num_layers\n")
+                        "model,num_layers,expert,per_rank_cap\n")
                 for name, B, sms, phase, counts, us, mode in rows:
                     f.write(f"{name},{B},{sms},{phase},\"{counts}\",{us:.4f},"
-                            f"{'graph' if mode else 'eager'},{args.model},{nl}\n")
+                            f"{'graph' if mode else 'eager'},{args.model},{nl},"
+                            f"{args.expert},{cfg.per_rank_cap}\n")
             print(f"# wrote {out_path}", flush=True)
 
     for b in benchers:
