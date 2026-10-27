@@ -7,7 +7,7 @@ share the row layout (source rank s writes local token t to row rank_token_offse
 [global_max, *] symmetric buffers), the per-step metadata, the pid >= ep_max_tokens early exit,
 the grid and the per-CTA-pair barrier. They differ only in how a row moves, so each hybrid
 kernel is the A2A-V kernel with one branch on a per-step mode flag that the metadata kernel
-writes (metadata.py, HAS_POLICY):
+writes (metadata.py, COMPUTE_MODES):
 
 Dispatch (flag step_metadata[3])
   * 1: the hidden row is multicast to every rank (multimem.st), as AGV-V.
@@ -183,79 +183,75 @@ def _hybrid_dispatch_v_kernel(
 
 
 @triton.jit
-def _reduce_rows(
-    output_u64, partial_mc_u64, partial_byte_offset, local_tokens, rank_token_offset, pid,
+def _reduce_row(
+    output_u64, partial_mc_u64, partial_byte_offset, token_offset, global_row, tid,
     HIDDEN_PACKS: tl.constexpr, BLOCK_SIZE: tl.constexpr,
 ):
-    """RSV-V rows: the switch sums row rank_token_offset + t over every rank (fp32 accumulation)."""
-    tid = tl.arange(0, BLOCK_SIZE)
-    for token_offset in range(pid, local_tokens, tl.num_programs(axis=0)):
-        global_row = (rank_token_offset + token_offset).to(tl.int64)
-        for channel_offset in range(0, HIDDEN_PACKS, BLOCK_SIZE):
-            cols = channel_offset + tid
-            mask = cols < HIDDEN_PACKS
-            (x, y, z, w) = ld_128(
-                partial_mc_u64 + partial_byte_offset // 8 + (global_row * HIDDEN_PACKS + cols) * 2,
-                mask=mask,
-                multicast_op=True,
-            )
-            st_128(
-                output_u64 + (token_offset * HIDDEN_PACKS + cols) * 2,
-                x, y, z, w,
-                mask=mask,
-                multicast_op=False,
-            )
+    """One token, multicast-reduce: the switch sums row global_row over every rank (fp32
+    accumulation). The body of the RSV-V token loop, verbatim."""
+    for channel_offset in range(0, HIDDEN_PACKS, BLOCK_SIZE):
+        cols = channel_offset + tid
+        mask = cols < HIDDEN_PACKS
+        (x, y, z, w) = ld_128(
+            partial_mc_u64 + partial_byte_offset // 8 + (global_row * HIDDEN_PACKS + cols) * 2,
+            mask=mask,
+            multicast_op=True,
+        )
+        st_128(
+            output_u64 + (token_offset * HIDDEN_PACKS + cols) * 2,
+            x, y, z, w,
+            mask=mask,
+            multicast_op=False,
+        )
 
 
 @triton.jit
-def _pull_rows(
-    output_u64, peer_table, partial_byte_offset, routing_ids, local_tokens, rank_token_offset,
-    pid, HIDDEN_PACKS: tl.constexpr, TOPK: tl.constexpr, NUM_LOCAL_EXPERTS: tl.constexpr,
+def _pull_row(
+    output_u64, peer_table, partial_byte_offset, routing_ids, token_offset, global_row, tid,
+    HIDDEN_PACKS: tl.constexpr, TOPK: tl.constexpr, NUM_LOCAL_EXPERTS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """A2A-V rows: pull row rank_token_offset + t from each distinct destination rank and sum in
-    fp32 in a fixed order (the _a2a_combine_v_kernel loop)."""
-    tid = tl.arange(0, BLOCK_SIZE)
-    for token_offset in range(pid, local_tokens, tl.num_programs(axis=0)):
-        global_row = (rank_token_offset + token_offset).to(tl.int64)
-        for channel_offset in range(0, HIDDEN_PACKS, BLOCK_SIZE):
-            cols = channel_offset + tid
-            mask = cols < HIDDEN_PACKS
-            acc_xl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_xh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_yl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_yh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_zl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_zh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_wl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            acc_wh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-            sent = tl.full((), 0, tl.int64)
-            for k in tl.static_range(TOPK):
-                dst, first, sent = _next_destination(
-                    routing_ids, token_offset, sent, k, TOPK, NUM_LOCAL_EXPERTS
-                )
-                peer = tl.load(peer_table + dst).to(tl.pointer_type(tl.uint64))
-                (x, y, z, w) = _ld_128_or_zero(
-                    peer + partial_byte_offset // 8 + (global_row * HIDDEN_PACKS + cols) * 2,
-                    mask & first,
-                )
-                acc_xl += _bf16_lo_to_f32(x)
-                acc_xh += _bf16_hi_to_f32(x)
-                acc_yl += _bf16_lo_to_f32(y)
-                acc_yh += _bf16_hi_to_f32(y)
-                acc_zl += _bf16_lo_to_f32(z)
-                acc_zh += _bf16_hi_to_f32(z)
-                acc_wl += _bf16_lo_to_f32(w)
-                acc_wh += _bf16_hi_to_f32(w)
-            st_128(
-                output_u64 + (token_offset * HIDDEN_PACKS + cols) * 2,
-                _f32_to_bf16x2(acc_xl, acc_xh),
-                _f32_to_bf16x2(acc_yl, acc_yh),
-                _f32_to_bf16x2(acc_zl, acc_zh),
-                _f32_to_bf16x2(acc_wl, acc_wh),
-                mask=mask,
-                multicast_op=False,
+    """One token, pull: read row global_row from each distinct destination rank and sum in fp32
+    in a fixed order. The body of the _a2a_combine_v_kernel token loop, verbatim: each peer
+    load's address is written out in full (see the kernel docstring)."""
+    for channel_offset in range(0, HIDDEN_PACKS, BLOCK_SIZE):
+        cols = channel_offset + tid
+        mask = cols < HIDDEN_PACKS
+        acc_xl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_xh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_yl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_yh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_zl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_zh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_wl = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        acc_wh = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        sent = tl.full((), 0, tl.int64)
+        for k in tl.static_range(TOPK):
+            dst, first, sent = _next_destination(
+                routing_ids, token_offset, sent, k, TOPK, NUM_LOCAL_EXPERTS
             )
+            peer = tl.load(peer_table + dst).to(tl.pointer_type(tl.uint64))
+            (x, y, z, w) = _ld_128_or_zero(
+                peer + partial_byte_offset // 8 + (global_row * HIDDEN_PACKS + cols) * 2,
+                mask & first,
+            )
+            acc_xl += _bf16_lo_to_f32(x)
+            acc_xh += _bf16_hi_to_f32(x)
+            acc_yl += _bf16_lo_to_f32(y)
+            acc_yh += _bf16_hi_to_f32(y)
+            acc_zl += _bf16_lo_to_f32(z)
+            acc_zh += _bf16_hi_to_f32(z)
+            acc_wl += _bf16_lo_to_f32(w)
+            acc_wh += _bf16_hi_to_f32(w)
+        st_128(
+            output_u64 + (token_offset * HIDDEN_PACKS + cols) * 2,
+            _f32_to_bf16x2(acc_xl, acc_xh),
+            _f32_to_bf16x2(acc_yl, acc_yh),
+            _f32_to_bf16x2(acc_zl, acc_zh),
+            _f32_to_bf16x2(acc_wl, acc_wh),
+            mask=mask,
+            multicast_op=False,
+        )
 
 
 @triton.jit
@@ -289,11 +285,13 @@ def _hybrid_combine_v_kernel(
         split_ptr: with HAS_SPLIT, scalar int32 m: in multicast-reduce mode only CTAs pid < m
             multicast-reduce; the others pull (per-token mixing, as in dispatch).
 
-    Each mode's token loop is a separate helper, written exactly as in its stand-alone kernel
-    (_reduce_rows: RSV-V, _pull_rows: A2A-V), and both run after the same barrier. Variants that
-    shared the per-row address between the 22 peer loads or loaded the flag `volatile` compiled
-    to a pull loop 1-2 us/layer slower than A2A-V's at 16+ active CTAs per rank; this form
-    times within noise of both stand-alone kernels.
+    One token loop; per token, the branch picks a helper whose body is the stand-alone kernel's
+    token-loop body verbatim (_reduce_row: RSV-V, _pull_row: A2A-V). Keep each peer load's
+    address written out in full: precomputing one row offset and adding it to all 22 peer
+    pointers compiled to a pull loop 5-17% slower than A2A-V's (some peer-pointer loads were
+    scheduled between the row loads). Where the branch sits (outside or inside the token loop)
+    and where the flag is loaded make no measurable difference
+    (profiles/combine_branch_probe.py, docs/hybrid_dispatcher_design.md §3.4).
     """
     pid = tl.program_id(axis=0)
 
@@ -321,17 +319,20 @@ def _hybrid_combine_v_kernel(
     )
     sync_threads()
 
+    tid = tl.arange(0, BLOCK_SIZE)
     rank_token_offset = tl.load(rank_token_offset_ptr)
-    if use_reduce:
-        _reduce_rows(
-            output_u64, partial_mc_u64, partial_byte_offset, local_tokens, rank_token_offset, pid,
-            HIDDEN_PACKS, BLOCK_SIZE,
-        )
-    else:
-        _pull_rows(
-            output_u64, peer_table, partial_byte_offset, routing_ids, local_tokens,
-            rank_token_offset, pid, HIDDEN_PACKS, TOPK, NUM_LOCAL_EXPERTS, BLOCK_SIZE,
-        )
+    for token_offset in range(pid, local_tokens, tl.num_programs(axis=0)):
+        global_row = (rank_token_offset + token_offset).to(tl.int64)
+        if use_reduce:
+            _reduce_row(
+                output_u64, partial_mc_u64, partial_byte_offset, token_offset, global_row, tid,
+                HIDDEN_PACKS, BLOCK_SIZE,
+            )
+        else:
+            _pull_row(
+                output_u64, peer_table, partial_byte_offset, routing_ids, token_offset, global_row,
+                tid, HIDDEN_PACKS, TOPK, NUM_LOCAL_EXPERTS, BLOCK_SIZE,
+            )
     # No trailing barrier: the next dispatch's barrier protects the partial buffer.
 
 
@@ -367,7 +368,7 @@ def hybrid_dispatch_v(
 
     Args as a2a_dispatch_v, plus:
         dispatch_mode: scalar int32 CUDA tensor (step_metadata[3:4] from
-            fused_metadata_update with a policy), read on device each launch.
+            fused_metadata_update with mode_params), read on device each launch.
         mc_split: optional scalar int32 CUDA tensor m (prototype): in multicast mode only CTAs
             pid < m multicast, the rest of this rank's tokens are unicast.
     """
@@ -461,7 +462,7 @@ def hybrid_combine_v(
 
     Args as a2a_combine_v, plus:
         combine_mode: scalar int32 CUDA tensor (step_metadata[4:5] from fused_metadata_update
-            with a policy), read on device each launch. May differ per rank (zero rows are
+            with mode_params), read on device each launch. May differ per rank (zero rows are
             always written).
         mc_split: optional scalar int32 CUDA tensor m (prototype): in multicast-reduce mode only
             CTAs pid < m multicast-reduce, the rest of this rank's tokens are pulled.

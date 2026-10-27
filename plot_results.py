@@ -36,18 +36,24 @@ from models import get_model  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
-             "nccl": "NCCL (AllGather)", "hybrid": "Hybrid (auto: global, κ=0)",
+             "nccl": "NCCL (AllGather)",
+             "hybrid-global": "Hybrid (global)",
+             "hybrid-local": "Hybrid (local)",
+             "hybrid-global_imbalance": "Hybrid (global + imbalance term)",
              "hybrid-mc_rs": "Hybrid: multicast + ld_reduce",
              "hybrid-uc_pull": "Hybrid: unicast + pull",
              "hybrid-mc_pull": "Hybrid: multicast + pull",
-             "hybrid-uc_rs": "Hybrid: unicast + ld_reduce",
-             "hybrid-kappa": "Hybrid (global, κ=u)",
-             "hybrid-rank": "Hybrid (per-rank)"}
+             "hybrid-uc_rs": "Hybrid: unicast + ld_reduce"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2a": "tab:red", "hybrid": "black", "hybrid-mc_rs": "tab:olive",
+              "a2a": "tab:red", "hybrid-global": "black", "hybrid-local": "tab:green",
+              "hybrid-global_imbalance": "tab:purple", "hybrid-mc_rs": "tab:olive",
               "hybrid-uc_pull": "tab:pink", "hybrid-mc_pull": "tab:cyan",
-              "hybrid-uc_rs": "tab:brown", "hybrid-kappa": "tab:purple",
-              "hybrid-rank": "tab:green"}
+              "hybrid-uc_rs": "tab:brown"}
+# Mode names in older CSVs: hybrid (= global, then called auto), hybrid-per_rank / hybrid-rank
+# (= local), hybrid-kappa (= global_imbalance).
+for _old, _new in (("hybrid", "hybrid-global"), ("hybrid-per_rank", "hybrid-local"),
+                   ("hybrid-rank", "hybrid-local"), ("hybrid-kappa", "hybrid-global_imbalance")):
+    IMPL_NAME[_old], IMPL_COLOR[_old] = IMPL_NAME[_new], IMPL_COLOR[_new]
 PHASE_WHAT = {"dispatch": "dispatch", "combine": "combine"}  # decode_step: see main()
 # A second DeepEP line (fixed num_sms next to auto) gets its own color.
 DEEPEP_FIXED_COLOR = "tab:purple"
@@ -138,6 +144,8 @@ def _series(rows):
         name, color = IMPL_NAME.get(impl, impl), IMPL_COLOR.get(impl, "gray")
         variants = sorted({(r["sms_setting"] != "auto", r["num_sms"]) for r in mine})
         if impl != "deepep" or len(variants) == 1:
+            if impl == "deepep" and variants[0][0]:  # one fixed SM count: show it
+                name = f"{name} ({variants[0][1]} SMs)"
             out.append((name, color, mine))
             continue
         for i, (fixed, sms) in enumerate(variants):
@@ -203,6 +211,9 @@ def main():
     p.add_argument("--impls", default=None,
                    help="comma-separated impl names to plot (CSV impl column, e.g. "
                         "nvls,a2a,hybrid); default: all")
+    p.add_argument("--powers-of-two-only", action="store_true",
+                   help="plot only power-of-two B, dropping the in-between points (e.g. the "
+                        "sqrt(2) steps of a crossover calibration sweep)")
     p.add_argument("--title", default=None)
     p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
                    help="where bare --csv names are read from")
@@ -215,6 +226,8 @@ def main():
 
     impls = set(args.impls.split(",")) if args.impls else None
     rows, ep, model, num_layers, expert, gpu, imbalance = load(csv_path, args.phase, impls)
+    if args.powers_of_two_only:
+        rows = [r for r in rows if r["B"] & (r["B"] - 1) == 0]
     spec = get_model(model)
     subtitle = _subtitle(ep, spec, gpu)
     # run.py --imbalance: rank 0 holds rho x the mean token count.

@@ -97,19 +97,22 @@ def parse_args():
     p.add_argument("--num-layers", type=int, default=None,
                    help="MoE layers replayed per decode step (default: the model's MoE block "
                         "count -- Super 40, Ultra 48)")
-    p.add_argument("--hybrid-modes", default="auto",
-                   help="comma-separated hybrid modes to time (--impl hybrid): the policies "
-                        "auto (global, kappa=0), kappa (global, kappa=u), rank (per rank); "
-                        "forced mc_rs (multicast dispatch + multicast-reduce combine), uc_pull "
+    p.add_argument("--hybrid-modes", default="global",
+                   help="comma-separated hybrid modes to time (--impl hybrid): the "
+                        "mode-selection rules global (one threshold on the global token count, "
+                        "every rank alike; default), global_imbalance (global, ep_max_weight=u), "
+                        "local (each rank decides; the heaviest senders multicast); forced "
+                        "mc_rs (multicast dispatch + multicast-reduce combine), uc_pull "
                         "(unicast + pull), mc_pull, uc_rs; or split<f> (prototype: a fraction f "
                         "of each rank's CTAs multicast / multicast-reduce, the rest unicast / "
                         "pull)")
     p.add_argument("--hybrid-threshold", default=None,
-                   help="auto policy: multicast at global tokens <= this; one value or "
+                   help="global rule: multicast at global tokens <= this; one value or "
                         "'dispatch,combine' (default: bench_hybrid.DEFAULT_THRESHOLDS)")
-    p.add_argument("--hybrid-kappa", default="0",
-                   help="auto policy imbalance term: multicast iff valid - kappa*ep_max <= "
-                        "threshold; one value or 'dispatch,combine' (default 0)")
+    p.add_argument("--hybrid-ep-max-weight", default="0",
+                   help="global rule imbalance term: multicast iff valid_tokens - "
+                        "weight * ep_max_tokens <= threshold; one value or 'dispatch,combine' "
+                        "(default 0)")
     p.add_argument("--cta-cap", type=int, default=None,
                    help="CTA-grid cap (max_num_blocks) of the one-token-per-CTA kernels: NVLS, "
                         "A2A-V and Hybrid (default: bench_nvls.default_num_blocks, 4x the SM "
@@ -351,14 +354,14 @@ def main():
         benchers.append(HybridBencher(
             cfg, group,
             thresholds=_pair(args.hybrid_threshold, int) if args.hybrid_threshold else None,
-            kappa=_pair(args.hybrid_kappa, float)))
+            ep_max_weight=_pair(args.hybrid_ep_max_weight, float)))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes NCCL
     # lazily (comm created on first collective), and DeepEP's EPBuffer reuses the group's
     # communicator, so a barrier here materializes it (as Megatron's DeepEPDispatcher does).
     dist.barrier(group)
     if args.cta_cap:  # before build(): the grid sizes the signal pad
         for b in benchers:
-            if b.name in ("nvls", "a2a", "hybrid"):
+            if b.name in ("nvls", "a2a", "hybrid"):  # (hybrid: before build sets its mode)
                 b.num_sms = args.cta_cap
     for b in benchers:
         b.build()
@@ -371,12 +374,12 @@ def main():
         print(f"# expert={args.expert} per_rank_cap={cfg.per_rank_cap}", flush=True)
     if rank == 0:
         for b in benchers:
-            if b.name in ("nvls", "a2a", "hybrid"):
+            if b.name.split("-")[0] in ("nvls", "a2a", "hybrid"):
                 print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
                       f"{b.num_blocks * world * 4} B of barrier slots; "
                       f"signal pad = {b.signal_pad_bytes} B", flush=True)
-            if b.name == "hybrid":
-                print(f"# hybrid {b.describe_policy()}; modes timed: {','.join(hybrid_modes)}",
+            if hasattr(b, "describe_modes"):
+                print(f"# hybrid {b.describe_modes()}; modes timed: {','.join(hybrid_modes)}",
                       flush=True)
 
     # --validate: run known-value correctness checks per impl and exit. Confirms the
@@ -403,8 +406,8 @@ def main():
     nl = args.num_layers
     gpu = torch.cuda.get_device_name(local_rank).removeprefix("NVIDIA ").replace(",", " ")
     for b in benchers:
-        # DeepEP sweeps num_sms; Hybrid sweeps its modes (same buffers, only the device policy
-        # changes). NVLS and A2A-V run once at their block cap (b.num_sms, see
+        # DeepEP sweeps num_sms; Hybrid sweeps its modes (same buffers, only the device
+        # mode_params change). NVLS and A2A-V run once at their block cap (b.num_sms, see
         # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
         if b.name == "deepep":
             variants = deepep_sms
@@ -419,7 +422,7 @@ def main():
                 sms_setting = "auto" if variant == 0 else "fixed"
                 b.set_num_sms(variant)
             elif variant is not None:
-                b.set_mode(variant)  # renames b to hybrid-<mode> (hybrid for auto)
+                b.set_mode(variant)  # renames b to hybrid-<mode>
             sms = b.num_sms  # DeepEP: resolves 'auto' (0)
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)

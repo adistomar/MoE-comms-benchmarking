@@ -1,29 +1,32 @@
 # Copyright (c) 2026. Hybrid (multicast or unicast, chosen on device) dispatch/combine bencher.
 """
 Isolated bencher for the hybrid kernels in nvls/torch_symm_triton/hybrid_v.py. Same buffers,
-row layout and once-per-step metadata as bench_a2a.py, but the metadata kernel also evaluates a
-policy and writes two mode flags that the kernels read on device:
+row layout and once-per-step metadata as bench_a2a.py, but the metadata kernel also evaluates the
+mode-selection rule (parametrized by a device tensor, mode_params) and writes two mode flags that
+the kernels read on device:
 
-  metadata (once per step) : fused_metadata_update(policy)
+  metadata (once per step) : fused_metadata_update(mode_params)
                              -> [valid, offset, ep_max, dispatch_multicast, combine_reduce]
   dispatch (per MoE layer) : hybrid_dispatch_v (hidden multicast as AGV-V, or unicast to the
                              destination ranks as A2A-V; routing, probs multicast either way)
   combine  (per MoE layer) : hybrid_combine_v (multimem.ld_reduce as RSV-V, or pull as A2A-V)
 
-Modes (set_mode / run.py --hybrid-modes); the policies are evaluated by the metadata kernel
-(nvls/metadata.py), with a separate threshold for dispatch and combine:
-  auto     global: multicast iff valid_tokens - kappa * ep_max_tokens <= threshold (kappa from
-           --hybrid-kappa, default 0: a plain threshold on the global token count).
-  kappa    global, kappa = u (a token's expected remote destinations): also multicasts every
-           rank once the heaviest rank's unicast fan-out u * ep_max exceeds valid_tokens. The
-           threshold is scaled by (1 - u / EP) so a balanced batch switches at the same B.
-  rank     per rank: multicast if valid_tokens <= threshold (latency regime), else if this
-           rank is one of the heaviest senders, u * n_s > q * N + (1 - q) * S_s (bandwidth
-           model); flags may then differ across ranks.
-  mc_rs    force multicast dispatch + multicast-reduce combine   (the AGV-V / RSV-V pair)
-  uc_pull  force unicast dispatch + pull combine                 (the A2A-V pair)
-  mc_pull, uc_rs   the mixed pairs.
-Every mode uses the same kernels, buffers and launch grid; only the device policy tensor
+Modes (set_mode / run.py --hybrid-modes). The first three are mode-selection rules, evaluated
+by the metadata kernel (nvls/metadata.py) with a separate threshold for dispatch and combine:
+  global            every rank: multicast iff valid_tokens - ep_max_weight * ep_max_tokens <=
+                    threshold (ep_max_weight from --hybrid-ep-max-weight, default 0: a plain
+                    threshold on the global token count).
+  global_imbalance  global, ep_max_weight = u (a token's expected remote destinations): also
+                    multicasts every rank once the heaviest rank's unicast fan-out u * ep_max
+                    exceeds valid_tokens. The threshold is scaled by (1 - u / EP) so a balanced
+                    batch switches at the same B.
+  local             per rank: multicast if valid_tokens <= threshold (latency regime), else if
+                    this rank is one of the heaviest senders, u * n_s > q * N + (1 - q) * S_s
+                    (bandwidth model); flags may then differ across ranks.
+  mc_rs             force multicast dispatch + multicast-reduce combine (the AGV-V / RSV-V pair)
+  uc_pull           force unicast dispatch + pull combine               (the A2A-V pair)
+  mc_pull, uc_rs    the mixed pairs.
+Every mode uses the same kernels, buffers and launch grid; only the device mode_params tensor
 changes, so a captured graph can switch modes between replays.
 
 With --expert vllm the expert always writes a zero row for tokens with no local expert
@@ -36,24 +39,24 @@ import torch
 import torch.distributed as dist
 
 from nvls.metadata import (
+    ALWAYS_MULTICAST,
+    ALWAYS_UNICAST,
     HYBRID_STEP_METADATA_LEN,
-    POLICY_FORCE_MULTICAST,
-    POLICY_LEN,
-    POLICY_FORCE_UNICAST,
+    MODE_PARAMS_LEN,
     fused_metadata_update,
-    hybrid_policy_flags,
-    hybrid_policy_values,
+    hybrid_mode_flags,
+    hybrid_mode_params,
 )
 from nvls.torch_symm_triton.hybrid_v import hybrid_combine_v, hybrid_dispatch_v
 
 from bench_a2a import A2ABencher
 from common import Config, all_rank_counts
 
-# mode -> (dispatch_multicast, combine_reduce) for forced modes; None for the policies.
+# mode -> (dispatch_multicast, combine_reduce) for forced modes; None for the selection rules.
 MODES = {
-    "auto": None,
-    "kappa": None,
-    "rank": None,
+    "global": None,
+    "global_imbalance": None,
+    "local": None,
     "mc_rs": (1, 1),
     "uc_pull": (0, 0),
     "mc_pull": (1, 0),
@@ -111,16 +114,17 @@ class HybridBencher(A2ABencher):
     name = "hybrid"
     buffer_prefix = "hyb"
 
-    def __init__(self, cfg: Config, group, thresholds=None, kappa=(0.0, 0.0)):
+    def __init__(self, cfg: Config, group, thresholds=None, ep_max_weight=(0.0, 0.0)):
         super().__init__(cfg, group)
-        # (dispatch, combine) policy: multicast iff valid - kappa * ep_max <= threshold.
+        # (dispatch, combine) global rule: multicast iff valid - ep_max_weight * ep_max <= threshold.
         self.thresholds = (tuple(thresholds) if thresholds
                            else default_thresholds(cfg.model, cfg.ep_size))
-        self.kappa = tuple(kappa)
-        # Bandwidth-model constants of the kappa / rank policies (uniform routing).
+        self.ep_max_weight = tuple(ep_max_weight)
+        # Bandwidth-model constants of the global_imbalance / local rules (uniform routing):
+        # q = P(a given rank is one of a token's destinations), u = expected remote destinations.
         self.dest_prob = destination_probability(cfg.num_experts, cfg.topk, cfg.ep_size)
-        self.fanout = (cfg.ep_size - 1) * self.dest_prob  # u
-        self.mode = "auto"
+        self.remote_fanout = (cfg.ep_size - 1) * self.dest_prob  # u
+        self.mode = "global"
 
     # -- one-time allocation (collective) --------------------------------------
     def build(self):
@@ -128,38 +132,39 @@ class HybridBencher(A2ABencher):
         # [valid_tokens, rank_token_offset, ep_max_tokens, dispatch_multicast, combine_reduce]
         self.step_metadata = torch.zeros(HYBRID_STEP_METADATA_LEN, dtype=torch.int32,
                                          device=self.device)
-        self.policy = torch.zeros(POLICY_LEN, dtype=torch.int32, device=self.device)
+        self.mode_params = torch.zeros(MODE_PARAMS_LEN, dtype=torch.int32, device=self.device)
         # [dispatch, combine] multicasting-CTA counts of a split mode (NO_SPLIT otherwise).
         self.mc_split = torch.full((2,), NO_SPLIT, dtype=torch.int32, device=self.device)
         self.split = None
-        self.set_mode("auto")
+        self.set_mode("global")
 
-    # -- mode / policy ---------------------------------------------------------
-    def policy_values(self, mode: str):
-        """Host policy values (nvls.metadata.hybrid_policy_values) for `mode`."""
+    # -- modes ---------------------------------------------------------------
+    def mode_params_for(self, mode: str):
+        """Host mode parameters (nvls.metadata.hybrid_mode_params) for `mode`."""
         t_d, t_c = self.thresholds
-        if mode == "auto":
-            return hybrid_policy_values(t_d, t_c, self.kappa[0], self.kappa[1])
-        if mode == "kappa":
+        if mode == "global":
+            return hybrid_mode_params(t_d, t_c, *self.ep_max_weight)
+        if mode == "global_imbalance":
             # Balanced batch: valid - u * valid / EP <= T * (1 - u / EP) <=> valid <= T.
-            scale = 1.0 - self.fanout / self.cfg.ep_size
-            return hybrid_policy_values(round(t_d * scale), round(t_c * scale),
-                                        self.fanout, self.fanout)
-        if mode == "rank":
-            return hybrid_policy_values(t_d, t_c, per_rank=True, dest_prob=self.dest_prob)
+            u = self.remote_fanout
+            scale = 1.0 - u / self.cfg.ep_size
+            return hybrid_mode_params(round(t_d * scale), round(t_c * scale), u, u)
+        if mode == "local":
+            return hybrid_mode_params(t_d, t_c, local_rule=True, dest_prob=self.dest_prob)
         flags = (1, 1) if split_fraction(mode) is not None else MODES[mode]
-        n0 = [POLICY_FORCE_MULTICAST if f else POLICY_FORCE_UNICAST for f in flags]
-        return hybrid_policy_values(n0[0], n0[1])
+        t = [ALWAYS_MULTICAST if f else ALWAYS_UNICAST for f in flags]
+        return hybrid_mode_params(t[0], t[1])
 
     def set_mode(self, mode: str):
-        """Select a mode (collective: checks the policy is identical on every rank)."""
+        """Select a mode (collective: checks the mode parameters are identical on every
+        rank)."""
         assert is_valid_mode(mode), (
             f"unknown hybrid mode '{mode}' (choose from {tuple(MODES)} or split<f>)")
         self.mode = mode
         self.split = split_fraction(mode)
-        self.name = ("hybrid" if mode == "auto" else
-                     f"hybrid-split{self.split:g}" if self.split is not None else f"hybrid-{mode}")
-        self.set_policy(self.policy_values(mode))
+        self.name = (f"hybrid-split{self.split:g}" if self.split is not None
+                     else f"hybrid-{mode}")
+        self.set_mode_params(self.mode_params_for(mode))
         self._update_split()
 
     def _update_split(self):
@@ -175,30 +180,30 @@ class HybridBencher(A2ABencher):
         super().setup_batch(hidden, topk_idx, topk_weights)
         self._update_split()
 
-    def set_policy(self, values):
-        """Write the device policy tensor. Every rank must evaluate the same policy (the flags
-        may still differ per rank under the per-rank rule); checked with a MIN/MAX all-reduce."""
-        self.policy.copy_(torch.tensor(values, dtype=torch.int32))
-        lo, hi = self.policy.clone(), self.policy.clone()
+    def set_mode_params(self, values):
+        """Write the device mode_params tensor. Every rank must use the same parameters (the
+        flags may still differ per rank under the local rule); checked with a MIN/MAX
+        all-reduce."""
+        self.mode_params.copy_(torch.tensor(values, dtype=torch.int32))
+        lo, hi = self.mode_params.clone(), self.mode_params.clone()
         dist.all_reduce(lo, op=dist.ReduceOp.MIN, group=self.group)
         dist.all_reduce(hi, op=dist.ReduceOp.MAX, group=self.group)
-        assert torch.equal(lo, hi), f"hybrid policy differs across ranks: {lo} vs {hi}"
-        self._policy_values = list(values)
+        assert torch.equal(lo, hi), f"hybrid mode_params differ across ranks: {lo} vs {hi}"
 
-    def describe_policy(self) -> str:
-        return (f"thresholds (dispatch, combine) = {self.thresholds}; auto: kappa = "
-                f"{self.kappa}; kappa: kappa = u = {self.fanout:.2f}; rank: q = "
-                f"{self.dest_prob:.4f}")
+    def describe_modes(self) -> str:
+        return (f"thresholds (dispatch, combine) = {self.thresholds}; global: ep_max_weight = "
+                f"{self.ep_max_weight}; global_imbalance: ep_max_weight = u = "
+                f"{self.remote_fanout:.2f}; local: q = {self.dest_prob:.4f}")
 
     # -- timed / setup ops -----------------------------------------------------
     def metadata(self):
-        """Once-per-step token-count exchange + mode flags (policy read on device)."""
+        """Once-per-step token-count exchange + mode flags (mode_params read on device)."""
         fused_metadata_update(
             local_tokens=self.local_tokens,
             local_buf=self.meta["tensor"],
             symm_mem_hdl=self.meta["handle"],
             step_metadata=self.step_metadata,
-            policy=self.policy,
+            mode_params=self.mode_params,
         )
 
     def dispatch(self):
@@ -293,10 +298,10 @@ class HybridBencher(A2ABencher):
         torch.cuda.synchronize()
         dist.barrier(self.group)
 
-    def _validate_policy_flags(self):
-        """The metadata kernel's flags == hybrid_policy_flags for a spread of policies
-        (thresholds around valid_tokens, kappa 0 .. EP, per-rank rule on/off with random q), on
-        balanced, imbalanced and all-on-one-rank count vectors."""
+    def _validate_mode_flags(self):
+        """The metadata kernel's flags == hybrid_mode_flags for a spread of mode parameters
+        (thresholds around valid_tokens, ep_max_weight 0 .. EP, local rule on/off with random
+        q), on balanced, imbalanced and all-on-one-rank count vectors."""
         w, K, H, dev = self.cfg.ep_size, self.cfg.topk, self.cfg.hidden, self.device
         gen = torch.Generator().manual_seed(77)  # CPU, identical on all ranks
         out = []
@@ -310,26 +315,27 @@ class HybridBencher(A2ABencher):
                              torch.zeros(n, K, dtype=torch.float32, device=dev))
             bad, n_rank = [], 0
             for _ in range(24):
-                n0 = [int(torch.randint(-2, 2 * B + 3, (1,), generator=gen)) for _ in range(2)]
-                kappa = [float(torch.randint(0, 4 * w + 1, (1,), generator=gen)) / 4
-                         for _ in range(2)]
-                per_rank = bool(torch.randint(0, 2, (1,), generator=gen))
+                thresholds = [int(torch.randint(-2, 2 * B + 3, (1,), generator=gen))
+                              for _ in range(2)]
+                weights = [float(torch.randint(0, 4 * w + 1, (1,), generator=gen)) / 4
+                           for _ in range(2)]
+                local_rule = bool(torch.randint(0, 2, (1,), generator=gen))
                 q = float(torch.rand(1, generator=gen))
-                n_rank += per_rank
-                vals = hybrid_policy_values(n0[0], n0[1], kappa[0], kappa[1], per_rank, q)
-                self.set_policy(vals)
+                n_rank += local_rule
+                vals = hybrid_mode_params(*thresholds, *weights, local_rule, q)
+                self.set_mode_params(vals)
                 self.metadata()
                 got = tuple(self.step_metadata[3:5].tolist())
-                want = hybrid_policy_flags(vals, counts, self.cfg.rank)
+                want = hybrid_mode_flags(vals, counts, self.cfg.rank)
                 if got != want:
                     bad.append((vals, got, want))
-            out.append((f"hybrid policy flags  {label:6s}", not bad,
-                        f"24 random policies ({n_rank} per-rank), counts={counts[:4]}..."
+            out.append((f"hybrid mode flags    {label:6s}", not bad,
+                        f"24 random mode_params ({n_rank} local), counts={counts[:4]}..."
                         + (f"; mismatches {bad[:2]}" if bad else "")))
         return out
 
-    def _validate_per_rank(self):
-        """The per-rank rule on an imbalanced batch, where ranks pick different modes. Every
+    def _validate_local(self):
+        """The local rule on an imbalanced batch, where ranks pick different modes. Every
         rank's flags match the host reference; rows of multicasting senders reach every rank
         and rows of unicasting senders only their destinations (NaN elsewhere); each owner's
         combine follows its own flag (unrouted partial rows hold 1.0, which only the
@@ -338,18 +344,18 @@ class HybridBencher(A2ABencher):
         H, K, gcap = self.cfg.hidden, self.cfg.topk, self.cfg.global_cap
         # Rank 0 holds h tokens, every other rank 1. The rule multicasts rank 0 iff
         # h * (u - 1) > u, and never a rank holding 1 token here; h must fit the buffers.
-        u = self.fanout
+        u = self.remote_fanout
         h_min = math.floor(u / (u - 1)) + 1 if u > 1 else None
         if h_min is None or h_min > self.cfg.per_rank_cap:
-            return [("hybrid per-rank       ", True,
+            return [("hybrid local          ", True,
                      f"skipped: no imbalance within per_rank_cap={self.cfg.per_rank_cap} "
                      f"makes ranks differ (u={u:.2f})")]
         counts = [min(self.cfg.per_rank_cap, max(h_min, 8))] + [1] * (w - 1)
         n, off, valid, full_h, full_r, full_p, part_full, local = self._inputs(counts, 31337)
         # The bandwidth rule alone (no latency-regime override): the heavy rank multicasts.
-        vals = hybrid_policy_values(POLICY_FORCE_UNICAST, POLICY_FORCE_UNICAST,
-                                    per_rank=True, dest_prob=self.dest_prob)
-        self.set_policy(vals)
+        vals = hybrid_mode_params(ALWAYS_UNICAST, ALWAYS_UNICAST,
+                                  local_rule=True, dest_prob=self.dest_prob)
+        self.set_mode_params(vals)
         self.metadata()
         recv_h = self.recv_h["tensor"].view(gcap, H)
         recv_h[:valid] = float("nan")
@@ -359,7 +365,7 @@ class HybridBencher(A2ABencher):
         gathered = [torch.empty(2, dtype=torch.int32, device=dev) for _ in range(w)]
         dist.all_gather(gathered, self.step_metadata[3:5].clone(), group=self.group)
         flags = [tuple(f.tolist()) for f in gathered]
-        want = [hybrid_policy_flags(vals, counts, r) for r in range(w)]
+        want = [hybrid_mode_flags(vals, counts, r) for r in range(w)]
         mixed = len({f for f, c in zip(flags, counts) if c > 0}) > 1
         owner = torch.repeat_interleave(torch.arange(w, device=dev),
                                         torch.tensor(counts, device=dev))
@@ -371,7 +377,7 @@ class HybridBencher(A2ABencher):
                    and bool(torch.isnan(got_h[~present].float()).all())
                    and torch.equal(self.recv_r["tensor"].view(gcap, K)[:valid], full_r)
                    and torch.equal(self.recv_p["tensor"].view(gcap, K)[:valid], full_p))
-        out = [("hybrid per-rank dispatch", disp_ok,
+        out = [("hybrid local dispatch   ", disp_ok,
                 f"counts={counts[:4]}..., flags={flags[:4]}..., mixed={mixed}; rows of "
                 f"multicasting senders on every rank, of unicasting senders only on their "
                 f"destinations")]
@@ -388,7 +394,7 @@ class HybridBencher(A2ABencher):
                        else torch.equal(self.out, ref.to(torch.bfloat16)))
         else:
             comb_ok = True
-        out.append(("hybrid per-rank combine ", comb_ok,
+        out.append(("hybrid local combine    ", comb_ok,
                     f"this rank {'multicast-reduce' if reduce else 'pull'}s its {n} tokens"))
         return out
 
@@ -435,7 +441,7 @@ class HybridBencher(A2ABencher):
         return out
 
     def _validate_graph_switch(self):
-        """One captured graph (metadata -> dispatch -> combine), replayed with the policy
+        """One captured graph (metadata -> dispatch -> combine), replayed with mode_params
         changed between replays: each replay must follow the mode its flags select. Unrouted
         partial rows hold 1.0, so the multicast-reduce combine (which adds them) and the pull
         combine (which never reads them) give different results; unicast dispatch leaves NaN
@@ -445,11 +451,12 @@ class HybridBencher(A2ABencher):
         n, off, valid, full_h, full_r, full_p, part_full, local = self._inputs(
             all_rank_counts(B, w), 4242)
         unrouted = 1.0
-        cases = [(m, self.policy_values(m), MODES[m]) for m in FORCED_MODES]
-        # Threshold boundary (kappa = 0): multicast at valid <= n0, unicast one token below.
-        cases += [("auto n0=valid", hybrid_policy_values(valid, valid), (1, 1)),
-                  ("auto n0=valid-1", hybrid_policy_values(valid - 1, valid - 1), (0, 0)),
-                  ("auto split", hybrid_policy_values(valid, valid - 1), (1, 0))]
+        cases = [(m, self.mode_params_for(m), MODES[m]) for m in FORCED_MODES]
+        # Threshold boundary (ep_max_weight = 0): multicast at valid <= threshold, unicast one
+        # token below.
+        cases += [("global threshold=valid", hybrid_mode_params(valid, valid), (1, 1)),
+                  ("global threshold=valid-1", hybrid_mode_params(valid - 1, valid - 1), (0, 0)),
+                  ("global mixed", hybrid_mode_params(valid, valid - 1), (1, 0))]
 
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
@@ -465,7 +472,7 @@ class HybridBencher(A2ABencher):
         H, gcap = self.cfg.hidden, self.cfg.global_cap
         bad = []
         for label, vals, want in cases:
-            self.set_policy(vals)
+            self.set_mode_params(vals)
             self.recv_h["tensor"].view(gcap, H)[:valid] = float("nan")
             self._fill_partial(valid, part_full, local, unrouted)
             self.out.fill_(float("nan"))
@@ -485,7 +492,7 @@ class HybridBencher(A2ABencher):
                            f"combine_ok={comb_ok}")
         del g
         return [(f"hybrid graph switch  B={B:<4d}", not bad,
-                 f"{len(cases)} policies replayed in one captured graph"
+                 f"{len(cases)} mode_params replayed in one captured graph"
                  + (f"; {bad}" if bad else ""))]
 
     def _validate_split(self):
@@ -538,16 +545,16 @@ class HybridBencher(A2ABencher):
         return out
 
     def validate(self):
-        """Known-value checks -> list of (name, ok, detail): the policy flags, every forced
+        """Known-value checks -> list of (name, ok, detail): the mode flags, every forced
         mode's dispatch and combine, mode switching inside one captured graph, and the
-        per-rank rule with different modes on different ranks."""
+        local rule with different modes on different ranks."""
         mode = self.mode
-        out = self._validate_policy_flags()
+        out = self._validate_mode_flags()
         for m in FORCED_MODES:
             self.set_mode(m)
             out += self._validate_forced(m)
         out += self._validate_graph_switch()
-        out += self._validate_per_rank()
+        out += self._validate_local()
         out += self._validate_split()
         self.set_mode(mode)
         return out
