@@ -36,9 +36,19 @@ from models import get_model  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
-             "nccl": "NCCL (AllGather)"}
+             "nccl": "NCCL (AllGather)", "hybrid": "Hybrid (auto: global, κ=0)",
+             "hybrid-mc_rs": "Hybrid: multicast + ld_reduce",
+             "hybrid-uc_pull": "Hybrid: unicast + pull",
+             "hybrid-mc_pull": "Hybrid: multicast + pull",
+             "hybrid-uc_rs": "Hybrid: unicast + ld_reduce",
+             "hybrid-kappa": "Hybrid (global, κ=u)",
+             "hybrid-rank": "Hybrid (per-rank)"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2a": "tab:red"}
+              "a2a": "tab:red", "hybrid": "black", "hybrid-mc_rs": "tab:olive",
+              "hybrid-uc_pull": "tab:pink", "hybrid-mc_pull": "tab:cyan",
+              "hybrid-uc_rs": "tab:brown", "hybrid-kappa": "tab:purple",
+              "hybrid-rank": "tab:green"}
+PHASE_WHAT = {"dispatch": "dispatch", "combine": "combine"}  # decode_step: see main()
 # A second DeepEP line (fixed num_sms next to auto) gets its own color.
 DEEPEP_FIXED_COLOR = "tab:purple"
 
@@ -57,14 +67,15 @@ def _subtitle(ep, spec, gpu):
     return f"EP={ep} · {node_str} (4×{gpu}/node) · {shape}"
 
 
-def load(path):
-    """-> (rows, ep, model, num_layers, expert, gpu)."""
+def load(path, phase="decode_step", impls=None):
+    """-> (rows, ep, model, num_layers, expert, gpu, imbalance) for the rows of `phase` (and
+    `impls`); imbalance is run.py's --imbalance ("1" for CSVs without the column)."""
     rows = []
     ep = None  # world size = EP = #ranks, inferred from the per_rank_counts list length
-    models, layers, experts, gpus = set(), set(), set(), set()
+    models, layers, experts, gpus, imbalances = set(), set(), set(), set(), set()
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
-            if r["phase"] != "decode_step":
+            if r["phase"] != phase or (impls and r["impl"] not in impls):
                 continue
             if ep is None:
                 parts = [c for c in r.get("per_rank_counts", "").strip().strip("[]").split(",")
@@ -75,6 +86,7 @@ def load(path):
             layers.add(int(r["num_layers"]))
             experts.add(r.get("expert") or "identity")
             gpus.add(r.get("gpu") or "GB200")  # CSVs before the gpu column: GB200 runs
+            imbalances.add(float(r.get("imbalance") or 1.0))
             rows.append(dict(impl=r["impl"], B=int(r["global_B"]),
                              num_sms=int(r.get("num_sms", -1)),
                              sms_setting=r.get("sms_setting") or "",
@@ -83,7 +95,9 @@ def load(path):
         raise SystemExit(f"{path}: expected one model / num_layers / expert, got "
                          f"models={sorted(models)}, num_layers={sorted(layers)}, "
                          f"expert={sorted(experts)}")
-    return rows, ep, models.pop(), layers.pop(), experts.pop(), "/".join(sorted(gpus))
+    imbalance = "/".join(f"{x:g}" for x in sorted(imbalances))
+    return (rows, ep, models.pop(), layers.pop(), experts.pop(), "/".join(sorted(gpus)),
+            imbalance)
 
 
 def _ktick(v):
@@ -91,7 +105,8 @@ def _ktick(v):
     if v >= 1 << 20:
         return f"{v >> 20}M"
     if v > 999:
-        return f"{v >> 10}k"
+        # Non-power-of-two sweeps (e.g. 1448, 2896): one decimal, so ticks stay distinct.
+        return f"{v >> 10}k" if v % 1024 == 0 else f"{v / 1024:.1f}k"
     return str(v)
 
 
@@ -181,6 +196,13 @@ def main():
     p.add_argument("--csv", default="results.csv")
     p.add_argument("--out", default="results.png")
     p.add_argument("--x", choices=["B", "num_sms"], default="B")
+    p.add_argument("--phase", choices=["decode_step", "dispatch", "combine"],
+                   default="decode_step",
+                   help="which timed phase to plot (run.py --phases); dispatch / combine are "
+                        "that collective alone, all layers of a step")
+    p.add_argument("--impls", default=None,
+                   help="comma-separated impl names to plot (CSV impl column, e.g. "
+                        "nvls,a2a,hybrid); default: all")
     p.add_argument("--title", default=None)
     p.add_argument("--results-dir", default=os.path.join(REPO_DIR, "results"),
                    help="where bare --csv names are read from")
@@ -191,22 +213,26 @@ def main():
     out_path = args.out if os.path.dirname(args.out) else os.path.join(args.plots_dir, args.out)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    rows, ep, model, num_layers, expert, gpu = load(csv_path)
+    impls = set(args.impls.split(",")) if args.impls else None
+    rows, ep, model, num_layers, expert, gpu, imbalance = load(csv_path, args.phase, impls)
     spec = get_model(model)
     subtitle = _subtitle(ep, spec, gpu)
+    # run.py --imbalance: rank 0 holds rho x the mean token count.
+    rho = "" if imbalance == "1" else f" · imbalance ρ={imbalance}"
     what = ("dispatch+combine" if expert == "identity"
             else f"dispatch+{ {'vllm': 'vLLM'}.get(expert, expert)} experts+combine")
+    what = PHASE_WHAT.get(args.phase, what)
     fig, ax = plt.subplots(figsize=(9, 5.5))
     # Impl names live in the legend; keep the title short so it never clips.
     ends = []
     if args.x == "num_sms":
         plot_vs_sms(rows, ax)
         default_title = (f"{spec.name} MoE decode {what} vs DeepEP num_sms — "
-                         f"{num_layers} MoE layers/step\n{subtitle}")
+                         f"{num_layers} MoE layers/step{rho}\n{subtitle}")
     else:
         ends = plot_vs_B(rows, ax)
         default_title = (f"{spec.name} MoE decode {what} latency — "
-                         f"{num_layers} MoE layers/step\n{subtitle}")
+                         f"{num_layers} MoE layers/step{rho}\n{subtitle}")
     ax.set_ylabel("latency per decode step (ms)")
     # Log y: latency spans ~1 ms (NVLS) to ~40 ms (NCCL), so a linear axis would squash the
     # fast impls. Log keeps all curves legible.

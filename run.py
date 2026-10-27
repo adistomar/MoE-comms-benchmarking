@@ -6,7 +6,9 @@ Benchmark MoE dispatch/combine schemes in a decode setting within one NVLink dom
                    DeepEPDispatcher),
   - Megatron-NVLS (AllGather-V/ReduceScatter-V via NVLink multicast),
   - Megatron-NCCL (dense AllGather/ReduceScatter, CUDA-graph path, padded to equal counts),
-  - A2A-V         (unicast dispatch / pull combine over symmetric memory).
+  - A2A-V         (unicast dispatch / pull combine over symmetric memory),
+  - Hybrid        (the NVLS or A2A-V transport per collective, chosen on device each step from
+                   the global token count; --hybrid-modes also forces either one).
 
 Launch (one node, 4 GPUs):
     torchrun --nproc_per_node=4 run.py --model super --impl nvls,deepep,a2a \
@@ -21,7 +23,8 @@ B is the GLOBAL decode-token count across all EP ranks (B=1 => one token total).
 Times ONE full decode step = `--num-layers` MoE layers of paired dispatch->expert->combine
 (NVLS and A2A-V also run their once-per-step metadata kernel once), captured and replayed as a
 single CUDA graph, reported in microseconds as the max across ranks (critical path).
-Per-layer latency = decode_step / num_layers.
+Per-layer latency = decode_step / num_layers. --phases dispatch,combine also times each
+collective alone (metadata once + num_layers dispatches, or combines; NVLS, NCCL, A2A-V, Hybrid).
 """
 
 import argparse
@@ -40,7 +43,8 @@ from common import (  # noqa: E402
 from models import DEFAULT_MODEL, MODELS, get_model  # noqa: E402
 
 
-IMPLS = ("deepep", "nvls", "nccl", "a2a")
+IMPLS = ("deepep", "nvls", "nccl", "a2a", "hybrid")
+PHASES = ("decode_step", "dispatch", "combine")
 IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
 
 
@@ -64,8 +68,8 @@ def parse_args():
                    help="model whose MoE shape to benchmark (models.py): sets experts, top-k, "
                         "dispatched row width and the default --num-layers")
     p.add_argument("--impl", default="all",
-                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
-                        "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
+                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a | hybrid, "
+                        "or the aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
                         "e.g. --impl deepep,a2a")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
@@ -74,8 +78,16 @@ def parse_args():
                         "clamped to the device SM count). 'auto' (default) = DeepEP's "
                         "get_theoretical_num_sms, agreed across ranks -- Megatron's default")
     p.add_argument("--per-rank-cap", type=int, default=None,
-                   help="per-rank token capacity of every buffer (default: "
-                        "ceil(max batch / EP)); Megatron's e2e uses round_up(max_tokens)/TP")
+                   help="per-rank token capacity of every buffer (default: the largest "
+                        "per-rank count of the sweep, ceil(max batch / EP) when balanced); "
+                        "Megatron's e2e uses round_up(max_tokens)/TP")
+    p.add_argument("--imbalance", type=float, default=1.0,
+                   help="token-count imbalance across EP ranks: rank 0 holds imbalance x the "
+                        "mean (ceil(imbalance * B / EP) tokens), the others split the rest "
+                        "evenly; 1 = balanced (default), EP = every token on rank 0")
+    p.add_argument("--heavy-ranks", type=int, default=1,
+                   help="with --imbalance > 1: how many ranks (0..H-1) are each that heavy "
+                        "(imbalance <= EP / H); default 1")
     p.add_argument("--expert", choices=["identity", "vllm"], default="identity",
                    help="expert step between dispatch and combine: identity (comm only) or "
                         "vllm (Megatron's vllm_fused_moe with the model's expert shapes, called "
@@ -85,6 +97,27 @@ def parse_args():
     p.add_argument("--num-layers", type=int, default=None,
                    help="MoE layers replayed per decode step (default: the model's MoE block "
                         "count -- Super 40, Ultra 48)")
+    p.add_argument("--hybrid-modes", default="auto",
+                   help="comma-separated hybrid modes to time (--impl hybrid): the policies "
+                        "auto (global, kappa=0), kappa (global, kappa=u), rank (per rank); "
+                        "forced mc_rs (multicast dispatch + multicast-reduce combine), uc_pull "
+                        "(unicast + pull), mc_pull, uc_rs; or split<f> (prototype: a fraction f "
+                        "of each rank's CTAs multicast / multicast-reduce, the rest unicast / "
+                        "pull)")
+    p.add_argument("--hybrid-threshold", default=None,
+                   help="auto policy: multicast at global tokens <= this; one value or "
+                        "'dispatch,combine' (default: bench_hybrid.DEFAULT_THRESHOLDS)")
+    p.add_argument("--hybrid-kappa", default="0",
+                   help="auto policy imbalance term: multicast iff valid - kappa*ep_max <= "
+                        "threshold; one value or 'dispatch,combine' (default 0)")
+    p.add_argument("--cta-cap", type=int, default=None,
+                   help="CTA-grid cap (max_num_blocks) of the one-token-per-CTA kernels: NVLS, "
+                        "A2A-V and Hybrid (default: bench_nvls.default_num_blocks, 4x the SM "
+                        "count at EP <= 8, the SM count above)")
+    p.add_argument("--phases", default="decode_step",
+                   help="comma-separated phases to time: decode_step (dispatch -> expert -> "
+                        "combine per layer), dispatch, combine (that collective alone, "
+                        "num_layers times after one metadata; not DeepEP)")
     p.add_argument("--reps", type=int, default=100)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--timing", choices=["graph", "eager"], default="graph")
@@ -170,7 +203,7 @@ def run_validation(benchers, cfg, experts, device) -> bool:
     # (NCCL: fp32) and vllm_fused_moe keeps bf16 intermediates, hence the 3%/2% tolerances.
     if experts is not None:
         for B in (world * 2, 1):
-            n = all_rank_counts(B, world)[rank]
+            n = all_rank_counts(B, world, cfg.imbalance, cfg.heavy_ranks)[rank]  # as make_inputs
             hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
             outs = {}
             for b in benchers:
@@ -186,6 +219,31 @@ def run_validation(benchers, cfg, experts, device) -> bool:
                 ok, detail = True, "n=0 (idle rank)"
             report(f"vllm experts [{'='.join(outs)}] B={B:<4d}", ok, detail)
     return local_ok
+
+
+def phase_fn(b, phase: str, num_layers: int):
+    """The callable timed for `phase`, or None if `b` cannot time it. dispatch / combine run
+    that collective alone num_layers times, after the once-per-step metadata (NVLS, A2A-V,
+    Hybrid); DeepEP's combine needs its dispatch's handle, so it only times decode_step."""
+    if phase == "decode_step":
+        return lambda: b.decode_step(num_layers)
+    if not hasattr(b, phase):
+        return None
+    op = getattr(b, phase)
+
+    def fn():
+        if hasattr(b, "metadata"):
+            b.metadata()
+        for _ in range(num_layers):
+            op()
+    return fn
+
+
+def _pair(spec: str, cast):
+    """'v' -> (v, v); 'a,b' -> (a, b)."""
+    vals = [cast(v) for v in spec.split(",")]
+    assert len(vals) in (1, 2), f"expected one value or 'dispatch,combine', got {spec!r}"
+    return (vals[0], vals[-1])
 
 
 def timed(fn, group, args):
@@ -225,12 +283,28 @@ def main():
     if args.num_layers is None:
         args.num_layers = spec.num_moe_layers
     batch_sizes = [int(b) for b in args.batch_sizes.split(",")]
+    phases = [p.strip() for p in args.phases.split(",")]
+    for phase in phases:
+        if phase not in PHASES:
+            raise SystemExit(f"unknown --phases entry '{phase}' (choose from {PHASES})")
+    hybrid_modes = [m.strip() for m in args.hybrid_modes.split(",")]
+    if not 1 <= args.heavy_ranks < world:
+        raise SystemExit(f"--heavy-ranks {args.heavy_ranks} must be in [1, EP={world})")
+    if not 1.0 <= args.imbalance <= world / args.heavy_ranks:
+        raise SystemExit(f"--imbalance {args.imbalance} must be in [1, EP/heavy_ranks="
+                         f"{world / args.heavy_ranks:g}]")
+    # Largest per-rank count of the sweep: ceil(max_B / ep) when balanced, a heavy rank's share
+    # else.
+    max_local = max(max(all_rank_counts(B, world, args.imbalance, args.heavy_ranks))
+                    for B in batch_sizes)
     cfg = Config(
         model=args.model,
         ep_size=world, rank=rank, local_rank=local_rank, seed=args.seed,
-        per_rank_cap=args.per_rank_cap or -(-max(batch_sizes) // world),  # ceil(max_B / ep)
+        per_rank_cap=args.per_rank_cap or max_local,
+        imbalance=args.imbalance,
+        heavy_ranks=args.heavy_ranks,
     )
-    assert cfg.per_rank_cap * world >= max(batch_sizes), "--per-rank-cap too small"
+    assert cfg.per_rank_cap >= max_local, f"--per-rank-cap too small (need {max_local})"
     device = torch.device("cuda", local_rank)
 
     # DeepEP num_sms sweep: even values, clamped to the device SM count; 'auto' (the default)
@@ -249,8 +323,8 @@ def main():
               f"moe_intermediate_size={spec.moe_intermediate_size}",
               flush=True)
         print(f"# EP={world} experts={cfg.num_experts} topk={cfg.topk} hidden={cfg.hidden} "
-              f"per_rank_cap={cfg.per_rank_cap} timing={args.timing} reps={args.reps}",
-              flush=True)
+              f"per_rank_cap={cfg.per_rank_cap} timing={args.timing} reps={args.reps} "
+              f"imbalance={cfg.imbalance:g} heavy_ranks={cfg.heavy_ranks}", flush=True)
         print(f"# impl={','.join(impls)} num_layers={args.num_layers} device_sms={dev_sms} "
               f"deepep_num_sms_sweep={['auto' if s == 0 else s for s in deepep_sms]}", flush=True)
 
@@ -268,10 +342,24 @@ def main():
     if "a2a" in impls:
         from bench_a2a import A2ABencher
         benchers.append(A2ABencher(cfg, group))
+    if "hybrid" in impls:
+        from bench_hybrid import MODES, HybridBencher, is_valid_mode
+        for m in hybrid_modes:
+            if not is_valid_mode(m):
+                raise SystemExit(f"unknown --hybrid-modes entry '{m}' "
+                                 f"(choose from {tuple(MODES)} or split<f>, f in [0, 1])")
+        benchers.append(HybridBencher(
+            cfg, group,
+            thresholds=_pair(args.hybrid_threshold, int) if args.hybrid_threshold else None,
+            kappa=_pair(args.hybrid_kappa, float)))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes NCCL
     # lazily (comm created on first collective), and DeepEP's EPBuffer reuses the group's
     # communicator, so a barrier here materializes it (as Megatron's DeepEPDispatcher does).
     dist.barrier(group)
+    if args.cta_cap:  # before build(): the grid sizes the signal pad
+        for b in benchers:
+            if b.name in ("nvls", "a2a", "hybrid"):
+                b.num_sms = args.cta_cap
     for b in benchers:
         b.build()
     dist.barrier(group)
@@ -283,10 +371,13 @@ def main():
         print(f"# expert={args.expert} per_rank_cap={cfg.per_rank_cap}", flush=True)
     if rank == 0:
         for b in benchers:
-            if b.name in ("nvls", "a2a"):
+            if b.name in ("nvls", "a2a", "hybrid"):
                 print(f"# {b.name}: {b.num_blocks} CTAs x EP={world} -> "
                       f"{b.num_blocks * world * 4} B of barrier slots; "
                       f"signal pad = {b.signal_pad_bytes} B", flush=True)
+            if b.name == "hybrid":
+                print(f"# hybrid {b.describe_policy()}; modes timed: {','.join(hybrid_modes)}",
+                      flush=True)
 
     # --validate: run known-value correctness checks per impl and exit. Confirms the
     # isolated collectives actually move/reduce data correctly before we trust any latency
@@ -312,34 +403,48 @@ def main():
     nl = args.num_layers
     gpu = torch.cuda.get_device_name(local_rank).removeprefix("NVIDIA ").replace(",", " ")
     for b in benchers:
-        # DeepEP sweeps num_sms. NVLS and A2A-V run once at their block cap (b.num_sms, see
+        # DeepEP sweeps num_sms; Hybrid sweeps its modes (same buffers, only the device policy
+        # changes). NVLS and A2A-V run once at their block cap (b.num_sms, see
         # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
-        sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
-        for sms in sms_list:
-            # How DeepEP's SM count was chosen: 'auto' (theoretical) or 'fixed' (given).
-            sms_setting = ("auto" if sms == 0 else "fixed") if b.name == "deepep" else ""
+        if b.name == "deepep":
+            variants = deepep_sms
+        elif hasattr(b, "set_mode"):
+            variants = hybrid_modes
+        else:
+            variants = [None]
+        for variant in variants:
+            sms_setting = ""
             if b.name == "deepep":
-                b.set_num_sms(sms)
-                sms = b.num_sms  # resolves 'auto' (0)
+                # How DeepEP's SM count was chosen: 'auto' (theoretical) or 'fixed' (given).
+                sms_setting = "auto" if variant == 0 else "fixed"
+                b.set_num_sms(variant)
+            elif variant is not None:
+                b.set_mode(variant)  # renames b to hybrid-<mode> (hybrid for auto)
+            sms = b.num_sms  # DeepEP: resolves 'auto' (0)
             for B in batch_sizes:
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
                 b.setup_batch(hidden, topk_idx, topk_weights)
-                counts = all_rank_counts(B, world)
+                counts = all_rank_counts(B, world, cfg.imbalance, cfg.heavy_ranks)
 
-                # Time ONE full decode step = `nl` MoE layers of paired dispatch->
+                # decode_step: ONE full decode step = `nl` MoE layers of paired dispatch->
                 # combine (NVLS: + one metadata), captured & replayed as a single
                 # CUDA graph. Recording all nl layers in the graph is what models the
                 # layer dimension; the metadata is included once (per step), not per layer.
-                (_, step_us), mode = timed(lambda: b.decode_step(nl), group, args)
-                rows.append((b.name, B, sms, sms_setting, "decode_step", counts, step_us, mode))
+                # dispatch / combine: that collective alone, `nl` times (+ one metadata).
+                for phase in phases:
+                    fn = phase_fn(b, phase, nl)
+                    if fn is None:
+                        continue
+                    (_, step_us), mode = timed(fn, group, args)
+                    rows.append((b.name, B, sms, sms_setting, phase, counts, step_us, mode))
 
-                if rank == 0:
-                    smstr = f" sms={sms:3d}" if sms >= 0 else " sms= na"
-                    smstr += f" ({sms_setting})" if sms_setting else ""
-                    print(f"  {b.name:7s} B={B:4d}{smstr} counts={counts} "
-                          f"decode_step({nl}L)={step_us:9.2f}us "
-                          f"(per-layer={step_us / nl:6.2f}us)  "
-                          f"[{'graph' if mode else 'eager'}]", flush=True)
+                    if rank == 0:
+                        smstr = f" sms={sms:3d}" if sms >= 0 else " sms= na"
+                        smstr += f" ({sms_setting})" if sms_setting else ""
+                        print(f"  {b.name:7s} B={B:4d}{smstr} counts={counts} "
+                              f"{phase}({nl}L)={step_us:9.2f}us "
+                              f"(per-layer={step_us / nl:6.2f}us)  "
+                              f"[{'graph' if mode else 'eager'}]", flush=True)
 
     if rank == 0:
         print("\n# impl,global_B,num_sms,phase,latency_us,timing,model,num_layers", flush=True)
@@ -354,11 +459,12 @@ def main():
                 # model / num_layers / expert / gpu let plot_results.py label the plot
                 # without flags.
                 f.write("impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing,"
-                        "model,num_layers,expert,per_rank_cap,sms_setting,gpu\n")
+                        "model,num_layers,expert,per_rank_cap,sms_setting,gpu,imbalance\n")
                 for name, B, sms, sms_setting, phase, counts, us, mode in rows:
                     f.write(f"{name},{B},{sms},{phase},\"{counts}\",{us:.4f},"
                             f"{'graph' if mode else 'eager'},{args.model},{nl},"
-                            f"{args.expert},{cfg.per_rank_cap},{sms_setting},{gpu}\n")
+                            f"{args.expert},{cfg.per_rank_cap},{sms_setting},{gpu},"
+                            f"{cfg.imbalance:g}\n")
             print(f"# wrote {out_path}", flush=True)
 
     for b in benchers:

@@ -1,6 +1,6 @@
-# MoE decode dispatch/combine benchmark — DeepEP, Megatron NVLS & NCCL, and A2A-V
+# MoE decode dispatch/combine benchmark — DeepEP, Megatron NVLS & NCCL, A2A-V, and Hybrid
 
-Isolated micro-benchmark comparing four MoE expert-parallel **dispatch/combine**
+Isolated micro-benchmark comparing five MoE expert-parallel **dispatch/combine**
 schemes used for **inference decode** within a single NVLink domain, optionally with
 Megatron's real expert GEMMs between dispatch and combine (`--expert vllm`):
 
@@ -22,6 +22,12 @@ Megatron's real expert GEMMs between dispatch and combine (`--expert vllm`):
   its experts (direct peer stores), and combine **pulls** the per-rank partial outputs back
   and sums them in fp32. It is a drop-in alternative to the AGV-V / RSV-V pair (see
   [A2A-V design](#a2a-v-design)).
+- **Hybrid** (`nvls/torch_symm_triton/hybrid_v.py`) — one dispatch and one combine kernel that
+  pick, **on device, once per decode step**, between the NVLS transport (multicast dispatch /
+  `multimem.ld_reduce` combine) and the A2A-V transport (unicast dispatch / pull combine) from
+  the global token count. The design and its rationale are in
+  [`docs/hybrid_dispatcher_design.md`](docs/hybrid_dispatcher_design.md); see
+  [Hybrid](#hybrid).
 
 Both Megatron dispatchers are simulated standalone: the NVLS collectives are **vendored**
 (`nvls/`, an isolated copy of Megatron's `torch_symm_triton` + `symmetric_memory.py` +
@@ -52,6 +58,13 @@ ranks** (critical path). Per-layer = step / num_layers.
   outside the graph).
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
+- **Hybrid** per step: `fused_metadata_update` with a policy **once** (also writes the two mode
+  flags) then, per layer, `hybrid_dispatch_v` → `hybrid_combine_v`.
+
+`--phases dispatch,combine` also times each collective alone: one metadata call, then
+`--num-layers` dispatches (or combines), as one CUDA graph (NVLS, NCCL, A2A-V, Hybrid; DeepEP's
+combine needs its dispatch's handle, so it has only `decode_step`). The CSV's `phase` column
+tells the rows apart.
 
 ## Experimental setup (GB300 NVL72, 4 GPUs/node)
 
@@ -61,7 +74,7 @@ ranks** (critical path). Per-layer = step / num_layers.
 | experts / top-k / dispatched row width | 512 / 22 / 1024 (Super) or 2048 (Ultra) — the `moe_latent_size`, since both are latent MoEs |
 | parallelism | EP=4–64 (1 rank/GPU, 1–16 nodes of one NVL72 rack), TP=1, single NVLink domain |
 | dtype | dispatch **bf16** (all four); combine **bf16** for NVLS, DeepEP & A2A-V (all accumulate the sum in fp32: NVLS via `acc::f32`, A2A-V in registers), **fp32** for NCCL |
-| batch axis | **GLOBAL** B ∈ {1,…,1M} tokens across all EP ranks (balanced; B<EP leaves some ranks with 0 tokens; NCCL pads to the per-step max) |
+| batch axis | **GLOBAL** B ∈ {1,…,1M} tokens across all EP ranks (balanced; B<EP leaves some ranks with 0 tokens; NCCL pads to the per-step max). `--imbalance ρ` gives rank 0 ρ× the mean instead |
 | layers | 40 (Super) / 48 (Ultra) MoE layers per decode step; `--num-layers` overrides |
 | routing | uniform: 22 distinct experts/token; identical tensors fed to all impls |
 | expert | identity (default, communication only) or `--expert vllm`: Megatron's `vllm_fused_moe` (BF16, squared ReLU, random weights) |
@@ -167,8 +180,9 @@ tell rows routed to it from rows it did not receive ("holes" — the expert side
 with no local expert anyway). A trailing per-CTA-pair barrier (release/acquire) publishes
 the stores; one barrier covers all three buffers.
 
-**Combine (`a2a_combine_v`).** A leading per-CTA-pair barrier (release/acquire) makes every
-destination's partial outputs visible. For each local token the CTA recomputes the
+**Combine (`a2a_combine_v`).** A leading per-CTA-pair barrier (relaxed, as RSV-V's) waits
+until every destination has finished its expert step: the partials are written by earlier
+kernels. For each local token the CTA recomputes the
 destination ranks from its own routing and **pulls** row `rank_token_offset + t` from each
 destination's bf16 partial buffer with predicated 128-bit loads: all of a token's loads are
 issued together, and skipped entries (duplicates, `-1`) return zeros so the adds stay
@@ -189,6 +203,50 @@ barrier waits on each source's dispatch, which starts after that source's combin
 **Limits.** EP ≤ 64 (the dedup mask is one int64; asserted in the wrappers); hidden rows must
 be 16-byte aligned; routing ids must be int64; combine supports bf16 partials only.
 
+## Hybrid
+
+`nvls/torch_symm_triton/hybrid_v.py` provides `hybrid_dispatch_v` and `hybrid_combine_v`;
+`bench_hybrid.py` drives them. Full design: [`docs/hybrid_dispatcher_design.md`](docs/hybrid_dispatcher_design.md).
+
+**Kernels.** The A2A-V kernels with one branch each, on a mode flag read on device:
+- dispatch: multicast the hidden row (`multimem.st`, as AGV-V) or unicast it to the token's
+  destination ranks (as A2A-V). Routing and probs are multicast either way.
+- combine: `multimem.ld_reduce` over every rank (as RSV-V) or pull from the destination ranks
+  (as A2A-V).
+
+Layout, metadata, grid, early exit and barriers are the same in both modes, so the flag may
+change on any step, inside one captured graph.
+
+**Policy.** `fused_metadata_update(..., policy=)` evaluates, once per step and identically on
+every rank, `valid_tokens - kappa * ep_max_tokens <= threshold` for dispatch and for combine.
+It writes the results to `step_metadata[3]` (multicast dispatch) and `step_metadata[4]`
+(multicast-reduce combine). The policy is an int32 device tensor, so it can change between
+graph replays.
+- Defaults (`bench_hybrid.DEFAULT_THRESHOLDS`, `kappa = 0`) are separate dispatch and
+  combine crossovers. EP=4 and EP=64 are measured per phase on GB200; EP=16/32 are read off
+  the `plots/comm` crossovers for now.
+- `run.py` flags: `--hybrid-threshold D[,C]` and `--hybrid-kappa K[,K]`.
+- `--hybrid-modes` times several modes from one bencher:
+  - `auto`: the global threshold policy (κ=0 by default);
+  - `kappa`: global with κ = u, which also multicasts every rank under heavy imbalance;
+  - `rank`: per rank, where the heaviest senders multicast while their unicast fan-out
+    `u·n_s` exceeds `q·N + (1−q)·S_s` (q = P(a rank is a token's destination), u = (EP−1)·q,
+    S_s = n_s + the tokens of heavier ranks). Flags may then differ per rank.
+  - forced modes: `mc_rs` (≈ NVLS), `uc_pull` (≈ A2A-V), `mc_pull`, `uc_rs`.
+- Under token imbalance (`--imbalance`), `rank` was the best policy measured: up to 1.8×
+  faster than `auto` at EP=4 and up to 1.45× at EP=64. At EP=64, `kappa` can be slower than
+  `auto`. Details are in the design doc's §9.
+
+**Expert contract.** The expert always writes a zero row for tokens with no local expert
+(`write_unrouted_rows=True`): the multicast-reduce combine sums every rank's row, and the pull
+combine ignores those rows.
+
+**Numerics.** Dispatch copies rows bit-exactly in both modes. The pull combine is bit-exact
+against `bf16(m·x)`. `multimem.ld_reduce` (as in RSV-V) is within 1 bf16 ulp of it, with
+~87–88% of elements bit-exact in `--validate`. So the combine output can change by 1 ulp
+when B crosses the combine threshold; pin `--hybrid-threshold D,-1` (combine always pull) for
+batch-invariant runs.
+
 ## Expert compute (`--expert vllm`)
 
 `--expert vllm` runs Megatron's inference expert kernel `vllm_fused_moe`
@@ -207,6 +265,7 @@ Each impl calls it the way Megatron's MoE layer does for that dispatcher
 | NVLS | every gathered row | global | `valid_tokens` (step metadata) | the bf16 RSV buffer |
 | NCCL | every gathered row (padding rows routed to `-1`) | global | EP × padded count | the fp32 ReduceScatter input (Megatron passes no buffer, and the kernel then returns fp32) |
 | A2A-V | every row of the gathered layout | global | `valid_tokens` (step metadata) | the bf16 partial buffer; rows with no local expert are skipped (`write_unrouted_rows=False`) |
+| Hybrid | every row of the gathered layout | global | `valid_tokens` (step metadata) | the bf16 partial buffer, zero rows for tokens with no local expert (`write_unrouted_rows=True`) |
 
 `num_tokens_hint` (it only picks the kernel's tile sizes) is local tokens × EP, as in Megatron.
 At small EP the experts dominate the step: at EP=4, Super's 128 local experts are ~1.4 GB of
@@ -224,7 +283,15 @@ round-trips correctly, and DeepEP's timed dispatch→combine layer round-trips t
 #destination ranks). For A2A-V, tokens are routed to random subsets of ranks (plus an all-`-1` padding
 token) and it checks that routing and probs arrive bit-exact on every rank, routed hidden
 rows arrive bit-exact, rows not routed to a rank are left untouched (NaN sentinels), and
-combine returns `bf16(m·partial)` bit-exact. With ≥2 impls built it also **cross-checks**
+combine returns `bf16(m·partial)` bit-exact. For Hybrid, it checks:
+- the policy flags against a host reference for random policies;
+- every forced mode with the A2A-V checks made mode-aware: multicast dispatch delivers *every*
+  row, and the multicast-reduce combine reads zero rows on non-destination ranks and is
+  within 1 bf16 ulp;
+- one captured graph replayed under seven policies, each replay following the mode its flags
+  select.
+
+With ≥2 impls built it also **cross-checks**
 that all of them produce the same combine output on identical inputs (all compute `m·x`;
 NCCL is exact in fp32, NVLS, DeepEP & A2A-V combine in bf16 and agree within bf16 rounding).
 With `--expert vllm` it also runs one timed layer per impl (dispatch → `vllm_fused_moe` →
@@ -312,11 +379,15 @@ the e2e decode benchmark.
 names are resolved there; override with `--results-dir` / `--plots-dir`, or pass a path).
 
 `run.py` flags: `--model {super,ultra}` (default `ultra`), `--impl` (comma-separated list of
-`deepep`, `nvls`, `nccl`, `a2a`, or the aliases `both` = deepep,nvls and `all` =
-deepep,nvls,nccl; e.g. `--impl deepep,a2a`), `--batch-sizes`, `--num-layers` (default: the
+`deepep`, `nvls`, `nccl`, `a2a`, `hybrid`, or the aliases `both` = deepep,nvls and `all` =
+deepep,nvls,nccl; e.g. `--impl deepep,a2a`), `--batch-sizes`, `--phases` (comma list of
+`decode_step` (default), `dispatch`, `combine`), `--hybrid-modes` / `--hybrid-threshold` /
+`--hybrid-kappa` (see [Hybrid](#hybrid)), `--imbalance` (rank 0 holds ρ× the mean token
+count, the others split the rest; default 1 = balanced), `--cta-cap` (override the CTA-grid
+cap of NVLS, A2A-V and Hybrid; default 4× SMs at EP ≤ 8, 1× above), `--num-layers` (default: the
 model's MoE block count), `--expert {identity,vllm}` (default `identity`) with
 `--megatron-path`, `--per-rank-cap` (per-rank token capacity of every buffer; default
-`ceil(max B / EP)`, Megatron's e2e uses 2048), `--deepep-num-sms` (comma list of `auto` and/or
+`ceil(max B / EP)`, or rank 0's largest share with `--imbalance`; Megatron's e2e uses 2048), `--deepep-num-sms` (comma list of `auto` and/or
 SM counts — even, clamped to the device SM count; default `auto`), `--timing {graph,eager}`,
 `--reps`, `--warmup`, `--seed`, `--out`, `--results-dir`, `--validate` (correctness checks then
 exit — see above). CSVs record `model`, `num_layers`, `expert` and `per_rank_cap` per row.
@@ -334,9 +405,10 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 - `run.py` — torchrun driver (times one full decode step as a CUDA graph).
 - `models.py` — Nemotron-3 Super / Ultra presets (`--model`): layer pattern, MoE layer count, experts, top-k, `hidden_size`, `moe_latent_size`, `moe_intermediate_size` (torch-free; also used by the plotter).
 - `common.py` — config (shape from the model preset), global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing), `VllmExperts` (the `--expert vllm` step and its torch reference).
-- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` — the four benchers; each exposes `decode_step(num_layers)` (returns the last layer's output) + `validate()` + `functional_roundtrip()`, and runs `self.expert` between dispatch and combine when set.
-- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
-- `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds; the title shows the CSV's model, MoE layers per step and expert mode.
+- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` / `bench_hybrid.py` — the benchers; each exposes `decode_step(num_layers)` (returns the last layer's output) + `validate()` + `functional_roundtrip()`, and runs `self.expert` between dispatch and combine when set.
+- `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; changes vs upstream: the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, import isolation, and the optional hybrid `policy` in `metadata.py`), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels) and `nvls/torch_symm_triton/hybrid_v.py` (the hybrid kernels).
+- `docs/hybrid_dispatcher_design.md` — design of the hybrid dispatcher.
+- `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds, for `--phase decode_step` (default), `dispatch` or `combine`; the title shows the CSV's model, MoE layers per step and expert mode.
 - `expert_breakdown.py` — per-kernel time of one rank's `vllm_fused_moe` step on one GPU (no communication), per input layout.
 - `plot_ep64_vs_e2e.py` — EP=64 microbenchmark (communication only and with experts) next to the e2e decode benchmark.
 - `build_deepep_image.sh` — builds the container image with NCCL 2.32.3 and DeepEP 2.5 (see Setup).
@@ -371,7 +443,11 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
   GB200, communication only (B up to 1M) and with `--expert vllm` (B up to 128K). The older
   `plots/old_GB300/results_ultra_ep*.png` are GB300 runs from before the move to `EPBuffer`: their
   DeepEP lines are DeepEP v2 (`ElasticBuffer`) at `num_sms` = the device SM count, communication
-  only.
+  only. `plots/hybrid/` holds the hybrid (auto) next to AGV-V/RSV-V and A2A-V on GB200,
+  communication only, per phase (`decode_step`, `dispatch`, `combine`) for Super and Ultra at
+  EP=4 and EP=64 (see the design doc's Phase 0 results). `plots/hybrid_imbalance/` compares
+  the hybrid's `auto`, `kappa` and `rank` policies under `--imbalance` ρ ∈ {1, 1.5, 2, 4} at
+  EP=4 and ρ ∈ {1, 4, 16, 64} at EP=64.
 - **A2A-V routing/probs multicast.** Every rank receives every token's 264-byte routing +
   probs row (`B × 264` bytes per layer), independent of EP. Hidden-row traffic shrinks as EP
   grows, so this becomes a larger share of dispatch traffic at large EP (~14% of incoming

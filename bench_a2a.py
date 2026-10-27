@@ -29,6 +29,7 @@ from common import Config, size_mb
 
 class A2ABencher:
     name = "a2a"
+    buffer_prefix = "a2a"  # symmetric-buffer keys; subclasses use their own (bench_hybrid.py)
 
     def __init__(self, cfg: Config, group):
         self.cfg = cfg
@@ -60,11 +61,12 @@ class A2ABencher:
             return b
 
         # Own buffers (not NVLS's ep_* keys), so both benchers can run in one process.
-        self.recv_h = buf("a2a_recv_h", [gmax, H], torch.bfloat16)
-        self.recv_r = buf("a2a_recv_r", [gmax, K], torch.int64)
-        self.recv_p = buf("a2a_recv_p", [gmax, K], torch.float32)
-        self.partial = buf("a2a_partial", [gmax, H], torch.bfloat16)
-        self.meta = buf("a2a_meta", [cfg.ep_size], torch.int32)
+        p = self.buffer_prefix
+        self.recv_h = buf(f"{p}_recv_h", [gmax, H], torch.bfloat16)
+        self.recv_r = buf(f"{p}_recv_r", [gmax, K], torch.int64)
+        self.recv_p = buf(f"{p}_recv_p", [gmax, K], torch.float32)
+        self.partial = buf(f"{p}_partial", [gmax, H], torch.bfloat16)
+        self.meta = buf(f"{p}_meta", [cfg.ep_size], torch.int32)
 
         # [valid_tokens, rank_token_offset, ep_max_tokens]; written in-place each step.
         self.step_metadata = torch.zeros(3, dtype=torch.int32, device=self.device)

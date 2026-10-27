@@ -9,7 +9,8 @@ EP = world size.
 
 Batch-size axis is GLOBAL: B is the total number of decode tokens across all
 EP ranks. Tokens are distributed as evenly as possible; for B<EP some ranks
-hold 0 tokens. See README.md.
+hold 0 tokens. With --imbalance rho > 1, rank 0 holds rho times the mean (ceil(rho * B / EP))
+and the other ranks split the rest evenly. See README.md.
 """
 
 import inspect
@@ -36,6 +37,8 @@ class Config:
     local_rank: int = 0
     per_rank_cap: int = 0          # max tokens any single rank can hold (ceil(max_B/ep))
     seed: int = 1234
+    imbalance: float = 1.0         # rank 0 holds imbalance x the mean token count (1 = balanced)
+    heavy_ranks: int = 1           # with imbalance > 1: ranks 0..heavy_ranks-1 are each that heavy
 
     def __post_init__(self):
         spec = self.spec
@@ -78,17 +81,34 @@ def init_distributed() -> "tuple[dist.ProcessGroup, int, int, int]":
 
 
 # ---- Global -> per-rank token distribution -----------------------------------
-def local_token_count(global_B: int, rank: int, world: int) -> int:
-    """Balanced distribution of B global tokens across `world` ranks.
+def _balanced(total: int, parts: int) -> "list[int]":
+    return [total // parts + (1 if r < total % parts else 0) for r in range(parts)]
 
-    rank r gets B//world + (1 if r < B%world else 0). For B<world the first B
-    ranks get 1 token and the rest get 0.
+
+def all_rank_counts(global_B: int, world: int, imbalance: float = 1.0,
+                    heavy_ranks: int = 1) -> "list[int]":
+    """Distribution of B global tokens across `world` ranks.
+
+    imbalance == 1 (default): balanced, rank r gets B//world + (1 if r < B%world else 0); for
+    B<world the first B ranks get 1 token and the rest get 0.
+    imbalance = rho > 1: ranks 0..heavy_ranks-1 are heavy, each with
+    min(B // heavy_ranks, ceil(rho * B / world)) tokens, rho times the mean; the other ranks
+    split the rest as evenly as possible. rho = world / heavy_ranks puts every token on the
+    heavy ranks.
     """
-    return global_B // world + (1 if rank < (global_B % world) else 0)
+    if imbalance == 1.0:
+        return _balanced(global_B, world)
+    assert 1 <= heavy_ranks < world, f"heavy_ranks {heavy_ranks} outside [1, {world})"
+    assert 1.0 <= imbalance <= world / heavy_ranks, (
+        f"imbalance {imbalance} outside [1, {world / heavy_ranks:g}]")
+    heavy = min(global_B // heavy_ranks, math.ceil(imbalance * global_B / world))
+    rest = global_B - heavy * heavy_ranks
+    return [heavy] * heavy_ranks + _balanced(rest, world - heavy_ranks)
 
 
-def all_rank_counts(global_B: int, world: int) -> "list[int]":
-    return [local_token_count(global_B, r, world) for r in range(world)]
+def local_token_count(global_B: int, rank: int, world: int, imbalance: float = 1.0,
+                      heavy_ranks: int = 1) -> int:
+    return all_rank_counts(global_B, world, imbalance, heavy_ranks)[rank]
 
 
 # ---- Input generation (identical for both dispatchers) -----------------------
@@ -103,7 +123,7 @@ def make_inputs(cfg: Config, global_B: int, device: torch.device):
     Returns (hidden[n,H] bf16, topk_idx[n,K] int64, topk_weights[n,K] fp32),
     where n = this rank's local token count (may be 0).
     """
-    n = local_token_count(global_B, cfg.rank, cfg.ep_size)
+    n = local_token_count(global_B, cfg.rank, cfg.ep_size, cfg.imbalance, cfg.heavy_ranks)
     K, E, H = cfg.topk, cfg.num_experts, cfg.hidden
     # Per-(B, rank) seed so both impls reproduce the same routing.
     seed = cfg.seed + global_B * 131 + cfg.rank
