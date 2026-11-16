@@ -1,0 +1,22 @@
+impl,global_B,num_sms,phase,per_rank_counts,latency_us,timing,model,num_layers,expert,per_rank_cap,sms_setting,gpu
+flashinfer,1,-1,decode_step,"[1, 0, 0, 0, 0, 0, 0, 0]",847.4288,graph,ultra,48,identity,131072,,GB200
+flashinfer,2,-1,decode_step,"[1, 1, 0, 0, 0, 0, 0, 0]",847.4864,graph,ultra,48,identity,131072,,GB200
+flashinfer,4,-1,decode_step,"[1, 1, 1, 1, 0, 0, 0, 0]",849.0144,graph,ultra,48,identity,131072,,GB200
+flashinfer,8,-1,decode_step,"[1, 1, 1, 1, 1, 1, 1, 1]",835.3760,graph,ultra,48,identity,131072,,GB200
+flashinfer,16,-1,decode_step,"[2, 2, 2, 2, 2, 2, 2, 2]",825.7312,graph,ultra,48,identity,131072,,GB200
+flashinfer,32,-1,decode_step,"[4, 4, 4, 4, 4, 4, 4, 4]",841.2000,graph,ultra,48,identity,131072,,GB200
+flashinfer,64,-1,decode_step,"[8, 8, 8, 8, 8, 8, 8, 8]",839.0928,graph,ultra,48,identity,131072,,GB200
+flashinfer,128,-1,decode_step,"[16, 16, 16, 16, 16, 16, 16, 16]",854.0832,graph,ultra,48,identity,131072,,GB200
+flashinfer,256,-1,decode_step,"[32, 32, 32, 32, 32, 32, 32, 32]",888.3616,graph,ultra,48,identity,131072,,GB200
+flashinfer,512,-1,decode_step,"[64, 64, 64, 64, 64, 64, 64, 64]",959.8304,graph,ultra,48,identity,131072,,GB200
+flashinfer,1024,-1,decode_step,"[128, 128, 128, 128, 128, 128, 128, 128]",1208.7760,graph,ultra,48,identity,131072,,GB200
+flashinfer,2048,-1,decode_step,"[256, 256, 256, 256, 256, 256, 256, 256]",1755.1664,graph,ultra,48,identity,131072,,GB200
+flashinfer,4096,-1,decode_step,"[512, 512, 512, 512, 512, 512, 512, 512]",2925.9953,graph,ultra,48,identity,131072,,GB200
+flashinfer,8192,-1,decode_step,"[1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024]",5073.7247,graph,ultra,48,identity,131072,,GB200
+flashinfer,16384,-1,decode_step,"[2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]",9230.4962,graph,ultra,48,identity,131072,,GB200
+flashinfer,32768,-1,decode_step,"[4096, 4096, 4096, 4096, 4096, 4096, 4096, 4096]",17504.1412,graph,ultra,48,identity,131072,,GB200
+flashinfer,65536,-1,decode_step,"[8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192]",33868.2190,graph,ultra,48,identity,131072,,GB200
+flashinfer,131072,-1,decode_step,"[16384, 16384, 16384, 16384, 16384, 16384, 16384, 16384]",66114.3311,graph,ultra,48,identity,131072,,GB200
+flashinfer,262144,-1,decode_step,"[32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768]",130973.2788,graph,ultra,48,identity,131072,,GB200
+flashinfer,524288,-1,decode_step,"[65536, 65536, 65536, 65536, 65536, 65536, 65536, 65536]",260595.4102,graph,ultra,48,identity,131072,,GB200
+flashinfer,1048576,-1,decode_step,"[131072, 131072, 131072, 131072, 131072, 131072, 131072, 131072]",520142.9199,graph,ultra,48,identity,131072,,GB200

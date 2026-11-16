@@ -19,7 +19,8 @@
 #
 # Launch model: one srun task PER GPU (--ntasks-per-node=4), each task = one EP rank running
 # launch_rank.sh -> run.py. EP = world size = 4 * nodes, AUTOMATICALLY (run.py sets
-# Config.ep_size = world). The container image ships DeepEP >= 2.5 (build_deepep_image.sh).
+# Config.ep_size = world). The container image ships DeepEP >= 2.5, NCCL EP and FlashInfer 0.7.3
+# (build_deepep_image.sh), so every --impl runs in it (e.g. IMPL=deepep,nvls,a2a,flashinfer,ncclep).
 #
 #   SINGLE NODE:   sbatch run.sbatch                         # -> results/results_ultra.csv
 #                  MODEL=super sbatch run.sbatch             # -> results/results_super.csv
@@ -40,7 +41,7 @@
 
 set -uo pipefail
 BENCH_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/nemotron/users/aditomar/images/mcore_inference+fa4+deepep.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/nemotron/users/aditomar/images/mcore_inference+fa4+deepep+nccl_ep+flashinfer0.7.3.sqsh}"
 
 # rank 0 hosts the c10d store (torch env:// init) on the first node in the allocation;
 # derive it from scontrol (idiom from inference-bench/reasoning/vllm/slurm_vllm_profile.sh

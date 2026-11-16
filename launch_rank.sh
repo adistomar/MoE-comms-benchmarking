@@ -26,4 +26,8 @@ PY
 fi
 export MASTER_ADDR MASTER_PORT="${MASTER_PORT:-29500}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/tmp/triton_cache_rank${RANK}}"
+# FlashInfer JIT-compiles into ${FLASHINFER_WORKSPACE_BASE}/.cache/flashinfer (default: $HOME)
+# behind a file lock; on a network $HOME, dozens of ranks on many nodes taking that lock at once
+# fail with "Stale file handle" (EP=64). A node-local cache compiles once per node.
+export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-/tmp/flashinfer_workspace}"
 python3 run.py "$@"
