@@ -6,7 +6,10 @@ Benchmark MoE dispatch/combine schemes in a decode setting within one NVLink dom
                    DeepEPDispatcher),
   - Megatron-NVLS (AllGather-V/ReduceScatter-V via NVLink multicast),
   - Megatron-NCCL (dense AllGather/ReduceScatter, CUDA-graph path, padded to equal counts),
-  - A2A-V         (unicast dispatch / pull combine over symmetric memory).
+  - A2A-V         (unicast dispatch / pull combine over symmetric memory),
+  - FlashInfer    (NVLink one-sided all-to-all, flashinfer.moe_ep, set up like vLLM's
+                   flashinfer_nvlink_one_sided backend),
+  - NCCL EP       (NVIDIA/nccl-extensions nccl.ep; LL rank-major and HT flat).
 
 Launch (one node, 4 GPUs):
     torchrun --nproc_per_node=4 run.py --model super --impl nvls,deepep,a2a \
@@ -40,8 +43,9 @@ from common import (  # noqa: E402
 from models import DEFAULT_MODEL, MODELS, get_model  # noqa: E402
 
 
-IMPLS = ("deepep", "nvls", "nccl", "a2a")
-IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl")}
+IMPLS = ("deepep", "nvls", "nccl", "a2a", "flashinfer", "ncclep_ll", "ncclep_ht")
+IMPL_ALIASES = {"both": ("deepep", "nvls"), "all": ("deepep", "nvls", "nccl"),
+                "ncclep": ("ncclep_ll", "ncclep_ht")}
 
 
 def parse_impls(spec: str) -> "list[str]":
@@ -64,15 +68,17 @@ def parse_args():
                    help="model whose MoE shape to benchmark (models.py): sets experts, top-k, "
                         "dispatched row width and the default --num-layers")
     p.add_argument("--impl", default="all",
-                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a, or the "
-                        "aliases both (deepep,nvls) and all (deepep,nvls,nccl); "
-                        "e.g. --impl deepep,a2a")
+                   help="comma-separated dispatcher(s): deepep | nvls | nccl | a2a | "
+                        "flashinfer | ncclep_ll | ncclep_ht, or the aliases both (deepep,nvls), "
+                        "all (deepep,nvls,nccl) and ncclep (ncclep_ll,ncclep_ht); "
+                        "e.g. --impl deepep,flashinfer,ncclep")
     p.add_argument("--batch-sizes", default="1,2,4,8,16,32,64,128",
                    help="comma-separated GLOBAL token counts")
     p.add_argument("--deepep-num-sms", default="auto",
                    help="comma-separated SM counts to sweep for DeepEP (rounded to even, "
                         "clamped to the device SM count). 'auto' (default) = DeepEP's "
-                        "get_theoretical_num_sms, agreed across ranks -- Megatron's default")
+                        "get_theoretical_num_sms, agreed across ranks -- Megatron's default; "
+                        "'device' = the GPU's SM count (rounded to even), read at runtime")
     p.add_argument("--per-rank-cap", type=int, default=None,
                    help="per-rank token capacity of every buffer (default: "
                         "ceil(max batch / EP)); Megatron's e2e uses round_up(max_tokens)/TP")
@@ -238,8 +244,14 @@ def main():
     # default_num_blocks.)
     dev_sms = torch.cuda.get_device_properties(local_rank).multi_processor_count
     _even = lambda n: max(2, min(int(n), dev_sms) - (min(int(n), dev_sms) % 2))
-    # 0 = DeepEP's theoretical SM count, resolved after the buffer is built.
-    deepep_sms = sorted({0 if s == "auto" else _even(s) for s in args.deepep_num_sms.split(",")})
+    # 0 = DeepEP's theoretical SM count, resolved after the buffer is built. How each value was
+    # chosen goes to the CSV's sms_setting column: auto | device | fixed.
+    deepep_sms_setting = {}
+    for s in args.deepep_num_sms.split(","):
+        s = s.strip()
+        value = 0 if s == "auto" else _even(dev_sms if s == "device" else s)
+        deepep_sms_setting.setdefault(value, s if s in ("auto", "device") else "fixed")
+    deepep_sms = sorted(deepep_sms_setting)
 
     if rank == 0:
         print(f"# MoE dispatch/combine decode benchmark", flush=True)
@@ -268,6 +280,13 @@ def main():
     if "a2a" in impls:
         from bench_a2a import A2ABencher
         benchers.append(A2ABencher(cfg, group))
+    if "flashinfer" in impls:
+        from bench_flashinfer import FlashInferOneSidedBencher
+        benchers.append(FlashInferOneSidedBencher(cfg, group))
+    for algorithm in ("ll", "ht"):
+        if f"ncclep_{algorithm}" in impls:
+            from bench_nccl_ep import NcclEpBencher
+            benchers.append(NcclEpBencher(cfg, group, algorithm))
     # Force NCCL communicator creation BEFORE building benchers. torch initializes NCCL
     # lazily (comm created on first collective), and DeepEP's EPBuffer reuses the group's
     # communicator, so a barrier here materializes it (as Megatron's DeepEPDispatcher does).
@@ -316,15 +335,22 @@ def main():
         # default_num_blocks). NCCL picks its own grid (b.num_sms=-1 = N/A).
         sms_list = deepep_sms if b.name == "deepep" else [b.num_sms]
         for sms in sms_list:
-            # How DeepEP's SM count was chosen: 'auto' (theoretical) or 'fixed' (given).
-            sms_setting = ("auto" if sms == 0 else "fixed") if b.name == "deepep" else ""
+            # How DeepEP's SM count was chosen: 'auto' (theoretical), 'device' (the GPU's SM
+            # count) or 'fixed' (given).
+            sms_setting = deepep_sms_setting[sms] if b.name == "deepep" else ""
             if b.name == "deepep":
                 b.set_num_sms(sms)
                 sms = b.num_sms  # resolves 'auto' (0)
             for B in batch_sizes:
+                counts = all_rank_counts(B, world)
+                # NCCL EP HT dispatches at most 8192 tokens per rank (library constant).
+                if max(counts) > getattr(b, "max_tokens_per_rank", max(counts)):
+                    if rank == 0:
+                        print(f"  {b.name:7s} B={B:4d} skipped: {max(counts)} tokens on a rank "
+                              f"> its per-rank limit {b.max_tokens_per_rank}", flush=True)
+                    continue
                 hidden, topk_idx, topk_weights = make_inputs(cfg, B, device)
                 b.setup_batch(hidden, topk_idx, topk_weights)
-                counts = all_rank_counts(B, world)
 
                 # Time ONE full decode step = `nl` MoE layers of paired dispatch->
                 # combine (NVLS: + one metadata), captured & replayed as a single

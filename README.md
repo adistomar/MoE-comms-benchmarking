@@ -1,6 +1,6 @@
-# MoE decode dispatch/combine benchmark — DeepEP, Megatron NVLS & NCCL, and A2A-V
+# MoE decode dispatch/combine benchmark — DeepEP, Megatron NVLS & NCCL, A2A-V, FlashInfer and NCCL EP
 
-Isolated micro-benchmark comparing four MoE expert-parallel **dispatch/combine**
+Isolated micro-benchmark comparing six MoE expert-parallel **dispatch/combine**
 schemes used for **inference decode** within a single NVLink domain, optionally with
 Megatron's real expert GEMMs between dispatch and combine (`--expert vllm`):
 
@@ -22,6 +22,16 @@ Megatron's real expert GEMMs between dispatch and combine (`--expert vllm`):
   its experts (direct peer stores), and combine **pulls** the per-rank partial outputs back
   and sums them in fp32. It is a drop-in alternative to the AGV-V / RSV-V pair (see
   [A2A-V design](#a2a-v-design)).
+- **FlashInfer one-sided A2A** (`flashinfer.moe_ep` `NVLinkOneSidedAlltoAll`, FlashInfer ≥
+  0.7.2) — the NVLink one-sided all-to-all of vLLM's `flashinfer_nvlink_one_sided` backend, set
+  up the way vLLM sets it up: one MNNVL workspace per rank, fence transport (`cft=False,
+  lamport=False`), BF16 combine, `runtime_max_tokens_per_rank` = the batch's largest per-rank
+  count, and the expert output written straight into the combine-input buffer (no copy).
+- **NCCL EP** (NVIDIA/nccl-extensions `nccl.ep`) in both algorithms: **LL** (low-latency,
+  rank-major layout — the decode algorithm) and **HT** (high-throughput, flat layout — capped
+  at 8192 tokens per rank by the library, so larger batches are skipped). Set up like
+  FlashInfer's NCCL EP backend: a fresh NCCL communicator mirroring the torch group, a handle
+  initialized outside graph capture, then per layer `update` (routing) → `dispatch` → `combine`.
 
 Both Megatron dispatchers are simulated standalone: the NVLS collectives are **vendored**
 (`nvls/`, an isolated copy of Megatron's `torch_symm_triton` + `symmetric_memory.py` +
@@ -52,6 +62,16 @@ ranks** (critical path). Per-layer = step / num_layers.
   outside the graph).
 - **A2A-V** per step: `fused_metadata_update` **once** (same as NVLS) then, per layer,
   `a2a_dispatch_v` → `a2a_combine_v` (**bf16** partial buffer, fp32-accumulated).
+- **FlashInfer** per layer: `dispatch` (count exchange inside) → `combine` (bf16, reads the
+  combine-input buffer in place).
+- **NCCL EP** per layer: `handle.update(topk_idx)` (HT: includes the metadata exchange) →
+  `dispatch` + `complete` → `combine` (HT: + `complete`), as FlashInfer's NCCL EP backend calls
+  them. With `--expert vllm`, LL first sets the ids of rank-major padding rows to -1.
+
+`--impl` takes `deepep, nvls, nccl, a2a, flashinfer, ncclep_ll, ncclep_ht` and the aliases
+`both` (deepep,nvls), `all` (deepep,nvls,nccl) and `ncclep` (ncclep_ll,ncclep_ht).
+`--deepep-num-sms` takes SM counts, `auto` (DeepEP's theoretical count, the default) or
+`device` (all of the GPU's SMs, read at runtime).
 
 ## Experimental setup (GB300 NVL72, 4 GPUs/node)
 
@@ -247,9 +267,17 @@ torch ≥ 2.10 (for `set_signal_pad_size`).
 **1. Container image with DeepEP ≥ 2.5.** The DeepEP bencher uses `deep_ep.EPBuffer`
 (DeepEP 2.5), which needs NCCL ≥ 2.32.3 and reuses PyTorch's NCCL communicator, so torch and
 DeepEP must load the same `libnccl` (DeepEP checks this at import). `build_deepep_image.sh`
-builds such an image (`mcore_inference+fa4+deepep.sqsh`) from the mcore-inference + FA4 image:
-it replaces the system NCCL with 2.32.3, installs DeepEP at a pinned commit plus DeepJIT's
-`libdw`, and writes a `.manifest.txt` of the versions next to the image. Run it inside a pyxis
+builds such an image (`mcore_inference+fa4+deepep+nccl_ep+flashinfer0.7.3.sqsh`) from the
+mcore-inference + FA4 image: it replaces the system NCCL with 2.32.3, installs DeepEP at a pinned
+commit plus DeepJIT's `libdw`, builds [NCCL EP](https://github.com/NVIDIA/nccl-extensions/tree/main/nccl_ep)
+at a pinned commit against that NCCL (C library, `ep_test`/`ep_bench` under `/opt/nccl_ep`,
+Python bindings as `nccl.ep`), upgrades FlashInfer 0.6.8 → 0.7.3 (for `flashinfer.moe_ep`; with
+cuda-tile 1.8.0, cudnn-frontend 1.32.2 and cutlass-dsl 4.8.1, which `import flashinfer` needs —
+FA4 still imports; the 0.6.8 `flashinfer-cubin`/`flashinfer-jit-cache` are removed, so FlashInfer
+JIT-compiles its kernels), and writes a `.manifest.txt` of the versions next to the image. NCCL EP
+is built from source and FlashInfer installed with `--no-deps` because the PyPI `nccl-extensions`
+wheel pins NCCL 2.30.7. The earlier `mcore_inference+fa4+deepep.sqsh` has neither NCCL EP nor
+FlashInfer 0.7.3 (it still runs DeepEP, NVLS, NCCL and A2A-V); `run.sbatch` defaults to the new image. Run it inside a pyxis
 container of the base image as remapped root (see the script's header). Validated with that
 image: torch 2.11, Triton 3.6, CUDA 13.2, NCCL 2.32.3, `deep_ep` 2.5.0+f6aa38f. NVLS, NCCL and
 A2A-V need only torch + Triton. DeepEP JIT-compiles its kernels on first use (DeepJIT), once
@@ -263,7 +291,7 @@ work (A2A-V's expert step then writes every row).
 **3. Get an interactive allocation in the container** (adjust account/partition/image):
 ```bash
 srun -p batch --account=<ACCT> --qos=interactive -t 2:00:00 --nodes=1 --exclusive \
-  --gpus-per-node=4 --container-image <mcore_inference+fa4+deepep.sqsh> \
+  --gpus-per-node=4 --container-image <mcore_inference+fa4+deepep+nccl_ep+flashinfer0.7.3.sqsh> \
   --container-mounts "/home:/home,/lustre:/lustre" --pty /bin/bash
 ```
 
@@ -334,12 +362,12 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 - `run.py` — torchrun driver (times one full decode step as a CUDA graph).
 - `models.py` — Nemotron-3 Super / Ultra presets (`--model`): layer pattern, MoE layer count, experts, top-k, `hidden_size`, `moe_latent_size`, `moe_intermediate_size` (torch-free; also used by the plotter).
 - `common.py` — config (shape from the model preset), global→per-rank token split, routing/input gen, `time_region` (CUDA-event timing), `VllmExperts` (the `--expert vllm` step and its torch reference).
-- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` — the four benchers; each exposes `decode_step(num_layers)` (returns the last layer's output) + `validate()` + `functional_roundtrip()`, and runs `self.expert` between dispatch and combine when set.
+- `bench_deepep.py` / `bench_nvls.py` / `bench_nccl.py` / `bench_a2a.py` / `bench_flashinfer.py` / `bench_nccl_ep.py` — the benchers; each exposes `decode_step(num_layers)` (returns the last layer's output) + `validate()` + `functional_roundtrip()`, and runs `self.expert` between dispatch and combine when set.
 - `nvls/` — vendored, isolated NVLS collectives (zero Megatron deps; only change vs upstream is the Triton-3.6 widen, the block cap defaulting to the device SM count instead of 128, and import isolation), plus `nvls/torch_symm_triton/all_to_all_v.py` (the A2A-V kernels).
 - `plot_results.py` — plot `--x B` (default) or `--x num_sms`, in milliseconds; the title shows the CSV's model, MoE layers per step and expert mode.
 - `expert_breakdown.py` — per-kernel time of one rank's `vllm_fused_moe` step on one GPU (no communication), per input layout.
 - `plot_ep64_vs_e2e.py` — EP=64 microbenchmark (communication only and with experts) next to the e2e decode benchmark.
-- `build_deepep_image.sh` — builds the container image with NCCL 2.32.3 and DeepEP 2.5 (see Setup).
+- `build_deepep_image.sh` — builds the container image with NCCL 2.32.3, DeepEP 2.5, NCCL EP and FlashInfer 0.7.3 (see Setup).
 - `launch_rank.sh` — per-task launcher (one Slurm task per GPU = one EP rank).
 - `run.sbatch` — SLURM batch template.
 - `run_ep64_current.sh` — the EP=64 communication-only + with-experts runs at the e2e buffer size.
@@ -366,7 +394,12 @@ already type it i64. Without it the NVLS and A2A-V paths will not compile.
 - **Random experts, uniform routing.** `--expert vllm` uses random weights and uniform routing,
   so every expert gets about the same load; real routing is skewed, which changes the GEMM
   work per rank. The weight values themselves do not affect the timing.
-- **Sample plots.** `plots/comm/` and `plots/comm_expert/` hold the EP=4/16/32/64 sweeps of
+- **Sample plots and data.** `plots/comm/ultra_ep{8,64}_comm_all_dispatchers.png` compare all six
+  dispatchers (DeepEP at the device SM count, Megatron AGv/RSv and A2Av, FlashInfer one-sided,
+  NCCL EP LL/HT) for Ultra on GB200, communication only; their raw data is
+  `results/results_ultra_ep{8,64}.csv` (merged from the per-group `results_ultra_ep*_*.csv`).
+  Result CSVs under `results/` are committed alongside the plots.
+  `plots/comm/` and `plots/comm_expert/` also hold the EP=4/16/32/64 sweeps of
   a2a, nvls and DeepEP (`EPBuffer`, at `auto` and at the device SM count) for Super and Ultra on
   GB200, communication only (B up to 1M) and with `--expert vllm` (B up to 128K). The older
   `plots/old_GB300/results_ultra_ep*.png` are GB300 runs from before the move to `EPBuffer`: their

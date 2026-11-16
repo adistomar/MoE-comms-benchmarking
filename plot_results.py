@@ -36,9 +36,11 @@ from models import get_model  # noqa: E402
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 IMPL_NAME = {"deepep": "DeepEP A2Av", "nvls": "Megatron AGv/RSv", "a2a": "Megatron A2Av",
-             "nccl": "NCCL (AllGather)"}
+             "nccl": "NCCL (AllGather)", "flashinfer": "FlashInfer one-sided A2A",
+             "ncclep_ll": "NCCL EP LL", "ncclep_ht": "NCCL EP HT"}
 IMPL_COLOR = {"deepep": "tab:blue", "nvls": "tab:orange", "nccl": "tab:green",
-              "a2a": "tab:red"}
+              "a2a": "tab:red", "flashinfer": "tab:brown", "ncclep_ll": "tab:olive",
+              "ncclep_ht": "tab:cyan"}
 # A second DeepEP line (fixed num_sms next to auto) gets its own color.
 DEEPEP_FIXED_COLOR = "tab:purple"
 
@@ -123,10 +125,14 @@ def _series(rows):
         name, color = IMPL_NAME.get(impl, impl), IMPL_COLOR.get(impl, "gray")
         variants = sorted({(r["sms_setting"] != "auto", r["num_sms"]) for r in mine})
         if impl != "deepep" or len(variants) == 1:
+            if impl == "deepep" and mine[0]["sms_setting"] == "device":
+                name = f"{name} ({mine[0]['num_sms']} SMs = all)"
             out.append((name, color, mine))
             continue
         for i, (fixed, sms) in enumerate(variants):
             setting = f"{sms} SMs" if fixed else f"auto: {sms} SMs"
+            if any(r["sms_setting"] == "device" and r["num_sms"] == sms for r in mine):
+                setting = f"{sms} SMs = all"
             out.append((f"{name} ({setting})", DEEPEP_FIXED_COLOR if i else color,
                         [r for r in mine if (r["sms_setting"] != "auto", r["num_sms"])
                          == (fixed, sms)]))
